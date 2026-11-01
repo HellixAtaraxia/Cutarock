@@ -1,0 +1,3096 @@
+--[[
+	Vu Dong Script – Menu antarmuka (hanya UI) untuk Roblox Studio
+	Cara pakai:
+	  1. Studio → StarterGui → Insert Object → LocalScript
+	  2. Tempel seluruh kode ini ke dalam LocalScript
+	  3. Pasang logika game KAMU ke tabel Callbacks di bawah
+	Setiap tab di bilah samping kiri adalah SATU HALAMAN TERSENDIRI: Informasi, Batu Permata,
+	Otomatis, Player, ESP, Pengaturan. Klik tab mana pun, hanya isi tab itu yang tampil.
+	Tombol RightShift: sembunyikan / tampilkan menu. Seret bilah judul untuk memindahkan.
+	Tab persegi di sisi kiri layar: klik untuk menyembunyikan / menampilkan menu utama, seret untuk mengubah posisi.
+	Pengaturan → Diagnostik: panel FPS / Ping / memori / posisi / darah, log konsol, salin path objek, pindai Remote - membantu menulis & men-debug script.
+	Pengaturan → Pindai Map: membaca & mendaftar SELURUH objek di map (nama, jenis, path, posisi, ukuran), filter berdasarkan jenis / radius, tampilkan label 3D, salin / simpan file .txt / cetak ke konsol - agar menulis script lebih mudah.
+	Pengaturan: ada tambahan sakelar Boost FPS 120 (menurunkan grafis + membuka batas 120 FPS jika executor mendukung setfpscap).
+	Player: God Mode, Speed Hack (slider SPEED_MIN..SPEED_MAX), Jump Power (slider JUMP_MIN..JUMP_MAX), Full Health, Tak Terlihat, Tembus Dinding (Noclip), Terbang (Fly - diadaptasi dari FlyGuiV3 milik XNEO: slider Kecepatan Terbang + 2 tombol melayang ▲ ▼ untuk naik / turun) sudah berfungsi.
+Atur ukuran menu: W, H (bingkai), SIDE_W (bilah samping), ROW_H (tinggi tiap fitur).
+Atur ukuran teks menu utama: TEXT_SCALE (saat ini 3 = 3x lipat ukuran asli; Roblox membatasi maksimum 100).
+Tema UI: abu-abu (graphite & perak). Teks dibuat diam (tidak berkedip) agar nyaman di mata; efek warna-warni bisa dinyalakan lagi lewat TEXT_ANIMATE di blok "TEKS SELURUH MENU" di akhir file.
+Notifikasi selamat datang: di akhir file, atur WELCOME_TEXT / WELCOME_TIME / WELCOME_EVERY_OPEN. Matikan di Pengaturan → Tampilkan Notifikasi.
+]]
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local RunService = game:GetService("RunService")
+
+-- Link kanal Telegram (tampil di halaman Informasi)
+local TELEGRAM_URL = "https://t.me/VVDHackroblox"
+local TELEGRAM_SHORT = "t.me/VVDHackroblox"
+
+-- TikTok & info dukungan (tampil di halaman Informasi)
+local TIKTOK_URL = "https://www.tiktok.com/@vudongroblox"
+local TIKTOK_SHORT = "tiktok.com/@vudongroblox"
+local BANK_NAME = "Techcombank"
+local BANK_NUMBER = "0336005854"
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+----------------------------------------------------------------
+-- PERBAIKAN MENU TIDAK MUNCUL: Luau hanya mengizinkan maksimal 200 variabel local di tingkat paling luar,
+-- file aslinya punya ~250 sehingga script gagal dikompilasi. Seluruh logika karakter / ESP / FPS
+-- dibungkus dalam blok do ... end di bawah; hanya variabel yang dibutuhkan bagian antarmuka
+-- yang dideklarasikan lebih dulu di sini.
+----------------------------------------------------------------
+local SPEED_MIN, SPEED_MAX, SPEED_DEFAULT
+local JUMP_MIN, JUMP_MAX, JUMP_DEFAULT
+local getHumanoid, setSpeedValue, setJumpValue
+local ESP_COLOR_NAMES, ESP_COLORS, espColor
+local Callbacks, FlyAPI
+do
+----------------------------------------------------------------
+-- LOGIKA KARAKTER: God Mode (Kebal) & Speed Hack (Kecepatan)
+----------------------------------------------------------------
+local GOD_HP = 1e9 -- darah "tak terbatas" (pakai angka besar, bukan math.huge, supaya bar darah tidak error NaN)
+SPEED_MIN, SPEED_MAX, SPEED_DEFAULT = 4, 200, 50 -- rentang kecepatan slider (bawaan Roblox adalah 16)
+
+local godOn, speedOn = false, false
+local speedValue = SPEED_DEFAULT
+local baseMaxHealth, baseWalkSpeed = 100, 16 -- nilai asli game, dipakai untuk mengembalikan saat dimatikan
+local godConns, speedConn = {}, nil
+
+JUMP_MIN, JUMP_MAX, JUMP_DEFAULT = 10, 300, 100 -- rentang kekuatan lompat slider (bawaan Roblox JumpPower = 50)
+local jumpOn, fullOn = false, false
+local jumpValue = JUMP_DEFAULT
+local baseUseJump, baseJumpPower, baseJumpHeight = true, 50, 7.2 -- nilai asli game
+local jumpConns, fullConn = {}, nil
+
+local invisOn = false -- Tak Terlihat
+local invisConns, invisOrig = {}, {} -- koneksi event / Transparency asli tiap bagian tubuh
+local baseDisplayDist = Enum.HumanoidDisplayDistanceType.Viewer -- tipe tampilan nama + bar darah asli
+
+local noclipOn = false -- Tembus Dinding
+local noclipConn = nil -- koneksi Stepped (berjalan tiap frame fisika)
+local noclipOrig = setmetatable({}, { __mode = "k" }) -- bagian tubuh yang CanCollide-nya dimatikan (untuk dikembalikan saat dimatikan)
+
+function getHumanoid()
+	local char = player.Character
+	return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function clearGodConns()
+	for _, c in ipairs(godConns) do c:Disconnect() end
+	table.clear(godConns)
+end
+
+local function startGod(hum)
+	clearGodConns()
+	if hum.MaxHealth < GOD_HP then baseMaxHealth = hum.MaxHealth end
+	hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false) -- karakter tidak bisa mati
+	if not hum.Parent:FindFirstChild("VuDongGodFF") then
+		local ff = Instance.new("ForceField") -- blokir damage, sembunyikan efek
+		ff.Name, ff.Visible = "VuDongGodFF", false
+		ff.Parent = hum.Parent
+	end
+	hum.MaxHealth = GOD_HP
+	hum.Health = GOD_HP
+	table.insert(godConns, hum.HealthChanged:Connect(function(h)
+		if godOn and h < hum.MaxHealth then hum.Health = hum.MaxHealth end -- darah berkurang langsung dipulihkan
+	end))
+	table.insert(godConns, hum:GetPropertyChangedSignal("MaxHealth"):Connect(function()
+		if godOn and hum.MaxHealth ~= GOD_HP then
+			hum.MaxHealth = GOD_HP
+			hum.Health = GOD_HP
+		end
+	end))
+end
+
+local function stopGod(hum)
+	clearGodConns()
+	if hum and hum.Parent then
+		local ff = hum.Parent:FindFirstChild("VuDongGodFF")
+		if ff then ff:Destroy() end
+		hum:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
+		hum.MaxHealth = baseMaxHealth
+		hum.Health = baseMaxHealth
+	end
+end
+
+local function startSpeed(hum)
+	if speedConn then speedConn:Disconnect() end
+	baseWalkSpeed = hum.WalkSpeed
+	hum.WalkSpeed = speedValue
+	speedConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+		if speedOn and hum.WalkSpeed ~= speedValue then hum.WalkSpeed = speedValue end -- kalau game mengubah kecepatan, kembalikan lagi
+	end)
+end
+
+local function stopSpeed(hum)
+	if speedConn then
+		speedConn:Disconnect()
+		speedConn = nil
+	end
+	if hum and hum.Parent then hum.WalkSpeed = baseWalkSpeed end
+end
+
+-- slider memanggil fungsi ini; jika Speed Hack sedang aktif, langsung diterapkan
+function setSpeedValue(v)
+	speedValue = math.clamp(math.floor(v + 0.5), SPEED_MIN, SPEED_MAX)
+	if speedOn then
+		local hum = getHumanoid()
+		if hum then hum.WalkSpeed = speedValue end
+	end
+end
+
+local function clearJumpConns()
+	for _, c in ipairs(jumpConns) do c:Disconnect() end
+	table.clear(jumpConns)
+end
+
+local function startJump(hum)
+	clearJumpConns()
+	baseUseJump, baseJumpPower, baseJumpHeight = hum.UseJumpPower, hum.JumpPower, hum.JumpHeight
+	hum.UseJumpPower = true -- jika game memakai JumpHeight, ganti ke JumpPower agar slider berfungsi
+	hum.JumpPower = jumpValue
+	local function keep() -- kalau game mengubahnya, kembalikan sesuai slider
+		if not jumpOn then return end
+		if not hum.UseJumpPower then hum.UseJumpPower = true end
+		if hum.JumpPower ~= jumpValue then hum.JumpPower = jumpValue end
+	end
+	table.insert(jumpConns, hum:GetPropertyChangedSignal("JumpPower"):Connect(keep))
+	table.insert(jumpConns, hum:GetPropertyChangedSignal("UseJumpPower"):Connect(keep))
+end
+
+local function stopJump(hum)
+	clearJumpConns()
+	if hum and hum.Parent then
+		hum.UseJumpPower = baseUseJump
+		hum.JumpPower = baseJumpPower
+		hum.JumpHeight = baseJumpHeight
+	end
+end
+
+-- slider memanggil fungsi ini; jika Jump Power sedang aktif, langsung diterapkan
+function setJumpValue(v)
+	jumpValue = math.clamp(math.floor(v + 0.5), JUMP_MIN, JUMP_MAX)
+	if jumpOn then
+		local hum = getHumanoid()
+		if hum then hum.JumpPower = jumpValue end
+	end
+end
+
+local function startFull(hum)
+	if fullConn then fullConn:Disconnect() end
+	if hum.Health > 0 then hum.Health = hum.MaxHealth end
+	fullConn = hum.HealthChanged:Connect(function(h)
+		if fullOn and h > 0 and h < hum.MaxHealth then hum.Health = hum.MaxHealth end -- darah berkurang langsung dipenuhi lagi
+	end)
+end
+
+local function stopFull()
+	if fullConn then
+		fullConn:Disconnect()
+		fullConn = nil
+	end
+end
+
+-- Tak Terlihat: set Transparency = 1 untuk semua bagian tubuh, aksesori, wajah (Decal) dan sembunyikan nama / bar darah di atas kepala.
+-- Nilai asli disimpan untuk dikembalikan saat dimatikan. Benda baru yang muncul (aksesori, tool yang dipegang) juga otomatis disembunyikan.
+-- CATATAN: LocalScript hanya mengubah sisi pemain ini; agar pemain lain juga tidak melihat, perlu Script + RemoteEvent di sisi server.
+local function clearInvisConns()
+	for _, c in ipairs(invisConns) do c:Disconnect() end
+	table.clear(invisConns)
+end
+
+local function hideInvisPart(inst)
+	if invisOrig[inst] ~= nil then return end -- sudah diproses
+	local isPart = inst:IsA("BasePart") and inst.Name ~= "HumanoidRootPart"
+	if not (isPart or inst:IsA("Decal")) then return end -- Decal mencakup Texture / wajah karakter
+	invisOrig[inst] = inst.Transparency
+	inst.Transparency = 1
+	table.insert(invisConns, inst:GetPropertyChangedSignal("Transparency"):Connect(function()
+		if invisOn and inst.Transparency ~= 1 then inst.Transparency = 1 end -- kalau game mengubahnya, sembunyikan lagi
+	end))
+end
+
+local function startInvis(char, hum)
+	clearInvisConns()
+	table.clear(invisOrig)
+	for _, d in ipairs(char:GetDescendants()) do
+		hideInvisPart(d)
+	end
+	table.insert(invisConns, char.DescendantAdded:Connect(function(d)
+		if invisOn then hideInvisPart(d) end
+	end))
+	if hum then
+		baseDisplayDist = hum.DisplayDistanceType
+		hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None -- sembunyikan nama + bar darah
+	end
+end
+
+local function stopInvis(hum)
+	clearInvisConns() -- putuskan koneksi dulu, baru kembalikan nilai asli
+	for inst, t in pairs(invisOrig) do
+		if inst.Parent then inst.Transparency = t end
+	end
+	table.clear(invisOrig)
+	if hum and hum.Parent then hum.DisplayDistanceType = baseDisplayDist end
+end
+
+-- Tembus Dinding (Noclip): matikan CanCollide semua bagian tubuh tiap frame fisika (Humanoid sering menyalakannya
+-- kembali sendiri, jadi harus diset terus-menerus). Hanya bagian yang dimatikan script yang diingat, agar status dikembalikan dengan benar saat dimatikan.
+-- Loop membaca player.Character setiap kali, jadi tetap berfungsi setelah respawn tanpa perlu dipasang ulang.
+local function startNoclip()
+	if noclipConn then noclipConn:Disconnect() end
+	noclipConn = RunService.Stepped:Connect(function()
+		local char = player.Character
+		if not (noclipOn and char) then return end
+		for _, d in ipairs(char:GetDescendants()) do
+			if d:IsA("BasePart") and d.CanCollide then
+				noclipOrig[d] = true
+				d.CanCollide = false
+			end
+		end
+	end)
+end
+
+local function stopNoclip()
+	if noclipConn then
+		noclipConn:Disconnect()
+		noclipConn = nil
+	end
+	for part in pairs(noclipOrig) do
+		if part.Parent then part.CanCollide = true end
+	end
+	table.clear(noclipOrig)
+end
+
+----------------------------------------------------------------
+-- LOGIKA ESP: melihat pemain lain menembus dinding
+-- (Highlight garis tepi + warna, serta Nama / Darah / Jarak di atas kepala)
+-- CATATAN: hanya berjalan di sisi pemain ini. Roblox hanya menggambar maksimal ~31 Highlight sekaligus.
+----------------------------------------------------------------
+ESP_COLOR_NAMES = { "Merah", "Hijau", "Kuning", "Biru", "Putih" }
+ESP_COLORS = {
+	["Merah"] = Color3.fromRGB(255, 60, 60),
+	["Hijau"] = Color3.fromRGB(60, 230, 90),
+	["Kuning"] = Color3.fromRGB(255, 220, 50),
+	["Biru"] = Color3.fromRGB(50, 170, 255),
+	["Putih"] = Color3.fromRGB(255, 255, 255),
+}
+espColor = ESP_COLORS["Merah"]
+
+local espHL, espName, espHP, espDist = false, false, false, false -- 4 sakelar ESP
+local espObjs = {} -- espObjs[plr] = { hl = Highlight, gui = BillboardGui, txt = TextLabel }
+local espPlrConns = {} -- espPlrConns[plr] = koneksi CharacterAdded milik pemain itu
+local espGlobalConns = {} -- PlayerAdded / PlayerRemoving
+local espBeat, espLast = nil, 0
+
+local function espClear(plr)
+	local o = espObjs[plr]
+	if o then
+		if o.hl then o.hl:Destroy() end
+		if o.gui then o.gui:Destroy() end
+		espObjs[plr] = nil
+	end
+end
+
+local function espBuild(plr)
+	espClear(plr)
+	local char = plr.Character
+	if not char then return end
+	local head = char:FindFirstChild("Head") or char:WaitForChild("Head", 5)
+	if not head or plr.Character ~= char then return end
+
+	local hl = Instance.new("Highlight")
+	hl.Name = "VuDongESP"
+	hl.Adornee = char
+	hl.FillColor, hl.OutlineColor = espColor, Color3.new(1, 1, 1)
+	hl.FillTransparency, hl.OutlineTransparency = 0.6, 0
+	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop -- tampil menembus dinding
+	hl.Enabled = espHL
+	hl.Parent = char
+
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "VuDongESPInfo"
+	gui.Adornee = head
+	gui.AlwaysOnTop = true
+	gui.Size = UDim2.fromOffset(220, 70)
+	gui.StudsOffset = Vector3.new(0, 3, 0)
+	gui.Enabled = espName or espHP or espDist
+	gui.Parent = head
+
+	local txt = Instance.new("TextLabel")
+	txt.BackgroundTransparency = 1
+	txt.Size = UDim2.fromScale(1, 1)
+	txt.Font = Enum.Font.SourceSansBold
+	txt.TextSize = 16
+	txt.RichText = true
+	txt.TextColor3 = espColor
+	txt.TextStrokeTransparency = 0.3
+	txt.Text = ""
+	txt.Parent = gui
+
+	espObjs[plr] = { hl = hl, gui = gui, txt = txt }
+end
+
+-- perbarui hidup/mati tiap bagian + isi teks (dipanggil ~10 kali/detik)
+local function espUpdate()
+	local myHum = getHumanoid()
+	local myRoot = myHum and myHum.RootPart
+	local showGui = espName or espHP or espDist
+	for plr, o in pairs(espObjs) do
+		local char = plr.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if hum and o.gui.Parent then
+			o.hl.Enabled = espHL
+			o.hl.FillColor = espColor
+			o.gui.Enabled = showGui
+			if showGui then
+				o.txt.TextColor3 = espColor
+				local lines = {}
+				if espName then
+					table.insert(lines, plr.DisplayName)
+				end
+				if espHP then
+					local ratio = hum.MaxHealth > 0 and math.clamp(hum.Health / hum.MaxHealth, 0, 1) or 0
+					local col = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(60, 230, 90), ratio)
+					table.insert(lines, '<font color="#' .. col:ToHex() .. '">❤ ' .. math.floor(hum.Health) .. "</font>")
+				end
+				if espDist and myRoot and hum.RootPart then
+					table.insert(lines, math.floor((hum.RootPart.Position - myRoot.Position).Magnitude) .. " m")
+				end
+				o.txt.Text = table.concat(lines, "\n")
+			end
+		end
+	end
+end
+
+local function espHook(plr)
+	if plr == player or espPlrConns[plr] then return end
+	espPlrConns[plr] = plr.CharacterAdded:Connect(function()
+		task.spawn(espBuild, plr)
+	end)
+	if plr.Character then task.spawn(espBuild, plr) end
+end
+
+local function espStopAll()
+	for _, c in ipairs(espGlobalConns) do c:Disconnect() end
+	table.clear(espGlobalConns)
+	for _, c in pairs(espPlrConns) do c:Disconnect() end
+	table.clear(espPlrConns)
+	for plr in pairs(espObjs) do espClear(plr) end
+	if espBeat then
+		espBeat:Disconnect()
+		espBeat = nil
+	end
+end
+
+-- dipanggil setiap sakelar ESP diubah: selama masih ada yang aktif tetap berjalan, kalau semua mati dibersihkan
+local function espRefresh()
+	if espHL or espName or espHP or espDist then
+		if not espBeat then
+			for _, p in ipairs(Players:GetPlayers()) do espHook(p) end
+			table.insert(espGlobalConns, Players.PlayerAdded:Connect(espHook))
+			table.insert(espGlobalConns, Players.PlayerRemoving:Connect(function(plr)
+				local c = espPlrConns[plr]
+				if c then
+					c:Disconnect()
+					espPlrConns[plr] = nil
+				end
+				espClear(plr)
+			end))
+			espBeat = RunService.Heartbeat:Connect(function()
+				local now = os.clock()
+				if now - espLast < 0.1 then return end
+				espLast = now
+				espUpdate()
+			end)
+		end
+		espUpdate()
+	else
+		espStopAll()
+	end
+end
+
+----------------------------------------------------------------
+-- LOGIKA ESP PETI: menandai SEMUA peti di map (garis tepi kuning + nama + jarak, menembus dinding)
+-- Cara mengenali: objek (Model / Part) yang namanya mengandung salah satu dari CHEST_KEYWORDS.
+-- >>> Kalau peti di game kamu namanya lain, ubah CHEST_KEYWORDS sesuai nama itu. <<<
+-- CATATAN: jika game mengaktifkan StreamingEnabled, peti yang jauh (belum dimuat) belum tampil sampai kamu mendekat.
+----------------------------------------------------------------
+local CHEST_KEYWORDS = { "chest", "peti", "rương", "ruong" } -- huruf kecil; dicari dengan cara "mengandung" (kata Vietnam dipertahankan agar cocok dengan nama di game; "peti" ditambahkan)
+local CHEST_IGNORE = { "plate", "armor", "armour" } -- abaikan nama yang mengandung kata ini (mis. ChestPlate = baju zirah)
+local CHEST_COLOR = Color3.fromRGB(255, 200, 40)
+
+local chestOn = false
+local chestObjs = {} -- chestObjs[inst] = { hl = Highlight, gui = BillboardGui, txt = TextLabel, part = BasePart }
+local chestConns = {}
+local chestBeat, chestLast = nil, 0
+
+local function chestMatch(name)
+	local l = string.lower(name)
+	for _, bad in ipairs(CHEST_IGNORE) do
+		if string.find(l, bad, 1, true) then return false end
+	end
+	for _, kw in ipairs(CHEST_KEYWORDS) do
+		if string.find(l, kw, 1, true) then return true end
+	end
+	return false
+end
+
+local function chestClear(inst)
+	local o = chestObjs[inst]
+	if o then
+		if o.hl then o.hl:Destroy() end
+		if o.gui then o.gui:Destroy() end
+		chestObjs[inst] = nil
+	end
+end
+
+local function chestAdd(inst)
+	if chestObjs[inst] then return end
+	if not (inst:IsA("Model") or inst:IsA("BasePart")) then return end
+	if not chestMatch(inst.Name) then return end
+	-- kalau berada di dalam peti yang sudah ditandai (mis. tutup peti), lewati agar tidak ganda
+	local a = inst.Parent
+	while a and a ~= workspace do
+		if chestObjs[a] then return end
+		a = a.Parent
+	end
+	-- jangan tandai benda yang ada pada pemain
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr.Character and inst:IsDescendantOf(plr.Character) then return end
+	end
+	local part = inst:IsA("BasePart") and inst or inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true)
+	if not part then return end
+
+	local hl = Instance.new("Highlight")
+	hl.Name = "VDMark"
+	hl.Adornee = inst
+	hl.FillColor, hl.OutlineColor = CHEST_COLOR, Color3.new(1, 1, 1)
+	hl.FillTransparency, hl.OutlineTransparency = 0.5, 0
+	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop -- tampil menembus dinding
+	hl.Parent = inst
+
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "VDMarkInfo"
+	gui.Adornee = part
+	gui.AlwaysOnTop = true
+	gui.Size = UDim2.fromOffset(200, 50)
+	gui.StudsOffset = Vector3.new(0, 3, 0)
+	gui.Parent = part
+
+	local txt = Instance.new("TextLabel")
+	txt.BackgroundTransparency = 1
+	txt.Size = UDim2.fromScale(1, 1)
+	txt.Font = Enum.Font.SourceSansBold
+	txt.TextSize = 16
+	txt.TextColor3 = CHEST_COLOR
+	txt.TextStrokeTransparency = 0.3
+	txt.Text = "📦 " .. inst.Name
+	txt.Parent = gui
+
+	chestObjs[inst] = { hl = hl, gui = gui, txt = txt, part = part }
+end
+
+-- perbarui jarak (~4 kali/detik) dan bersihkan peti yang sudah hilang
+local function chestUpdate()
+	local myHum = getHumanoid()
+	local myRoot = myHum and myHum.RootPart
+	for inst, o in pairs(chestObjs) do
+		if inst.Parent and o.part.Parent then
+			local t = "📦 " .. inst.Name
+			if myRoot then
+				t = t .. "\n" .. math.floor((o.part.Position - myRoot.Position).Magnitude) .. " m"
+			end
+			o.txt.Text = t
+		else
+			chestClear(inst)
+		end
+	end
+end
+
+local function chestStop()
+	for _, c in ipairs(chestConns) do c:Disconnect() end
+	table.clear(chestConns)
+	if chestBeat then
+		chestBeat:Disconnect()
+		chestBeat = nil
+	end
+	for inst in pairs(chestObjs) do chestClear(inst) end
+end
+
+local function chestRefresh()
+	if chestOn then
+		if chestBeat then return end
+		table.insert(chestConns, workspace.DescendantAdded:Connect(function(d)
+			if chestOn then chestAdd(d) end
+		end))
+		table.insert(chestConns, workspace.DescendantRemoving:Connect(function(d)
+			if chestObjs[d] then chestClear(d) end
+		end))
+		chestBeat = RunService.Heartbeat:Connect(function()
+			local now = os.clock()
+			if now - chestLast < 0.25 then return end
+			chestLast = now
+			chestUpdate()
+		end)
+		-- pindai seluruh map (dipecah kecil agar tidak lag)
+		task.spawn(function()
+			local n = 0
+			for _, d in ipairs(workspace:GetDescendants()) do
+				if not chestOn then return end
+				chestAdd(d)
+				n += 1
+				if n % 1500 == 0 then task.wait() end
+			end
+		end)
+	else
+		chestStop()
+	end
+end
+
+----------------------------------------------------------------
+-- LOGIKA: Terbang (Fly) - diadaptasi dari FlyGuiV3 (XNEO)
+-- Cara terbang versi asli dipertahankan: BodyGyro + BodyVelocity menahan karakter melayang dan menghadap sesuai kamera,
+-- mematikan state Humanoid + animasi diam, bergerak mengikuti arah MoveDirection, UP / DOWN menggeser
+-- HumanoidRootPart naik / turun, slider = angka "speeds" (1 = bawaan versi asli).
+-- Beda dari versi asli: tanpa variabel global, hanya SATU loop Heartbeat (versi asli menambah loop baru tiap klik +/-),
+-- memakai dt sehingga kecepatan tidak berubah saat Boost FPS 120 aktif, dipasang di HumanoidRootPart (R6 / R15 sama-sama bisa),
+-- mengembalikan state Humanoid semula saat dimatikan, dan otomatis terbang lagi setelah respawn.
+----------------------------------------------------------------
+local fly = { on = false, speed = 1, up = false, down = false, conn = nil, bg = nil, bv = nil, saved = {} }
+local FLY_MIN, FLY_MAX, FLY_DEFAULT = 1, 20, 1 -- rentang kecepatan slider (1 = kecepatan asli FlyGuiV3)
+local FLY_STATES = {
+	Enum.HumanoidStateType.Climbing, Enum.HumanoidStateType.FallingDown, Enum.HumanoidStateType.Flying,
+	Enum.HumanoidStateType.Freefall, Enum.HumanoidStateType.GettingUp, Enum.HumanoidStateType.Jumping,
+	Enum.HumanoidStateType.Landed, Enum.HumanoidStateType.Physics, Enum.HumanoidStateType.PlatformStanding,
+	Enum.HumanoidStateType.Ragdoll, Enum.HumanoidStateType.Running, Enum.HumanoidStateType.RunningNoPhysics,
+	Enum.HumanoidStateType.Seated, Enum.HumanoidStateType.StrafingNoPhysics, Enum.HumanoidStateType.Swimming,
+}
+fly.speed = FLY_DEFAULT
+
+local function flyClean() -- lepas BodyGyro / BodyVelocity
+	if fly.bg then fly.bg:Destroy() fly.bg = nil end
+	if fly.bv then fly.bv:Destroy() fly.bv = nil end
+end
+
+local function flyTracks(hum, speed) -- diamkan / kembalikan animasi yang sedang berjalan
+	pcall(function()
+		for _, t in ipairs(hum:GetPlayingAnimationTracks()) do t:AdjustSpeed(speed) end
+	end)
+end
+
+local function startFly(char, hum)
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	flyClean()
+	for _, s in ipairs(FLY_STATES) do
+		if fly.saved[s] == nil then fly.saved[s] = hum:GetStateEnabled(s) end -- ingat state asli game
+		hum:SetStateEnabled(s, false)
+	end
+	local animate = char:FindFirstChild("Animate")
+	if animate then animate.Disabled = true end
+	flyTracks(hum, 0)
+	fly.bg = Instance.new("BodyGyro")
+	fly.bg.Name, fly.bg.P = "VuDongFlyGyro", 9e4
+	fly.bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+	fly.bg.CFrame = root.CFrame
+	fly.bg.Parent = root
+	fly.bv = Instance.new("BodyVelocity")
+	fly.bv.Name = "VuDongFlyVel"
+	fly.bv.Velocity = Vector3.zero
+	fly.bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+	fly.bv.Parent = root
+	hum.PlatformStand = true
+	hum:ChangeState(Enum.HumanoidStateType.Swimming)
+end
+
+local function stopFly(hum)
+	flyClean()
+	fly.up, fly.down = false, false
+	if hum and hum.Parent then
+		for s, was in pairs(fly.saved) do hum:SetStateEnabled(s, was) end
+		hum.PlatformStand = false
+		local animate = hum.Parent:FindFirstChild("Animate")
+		if animate then animate.Disabled = false end
+		flyTracks(hum, 1)
+		hum:ChangeState(Enum.HumanoidStateType.RunningNoPhysics)
+	end
+	table.clear(fly.saved)
+end
+
+-- satu-satunya loop Heartbeat: mengikuti MoveDirection, menjaga arah kamera, UP / DOWN
+local function flyLoop(run)
+	if fly.conn then fly.conn:Disconnect() fly.conn = nil end
+	if not run then return end
+	fly.conn = RunService.Heartbeat:Connect(function(dt)
+		local char = player.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not (fly.on and hum and root and hum.Health > 0) then return end
+		local k = math.min(dt * 60, 4) -- dinormalisasi ke 60 FPS (versi asli menggeser tetap tiap frame)
+		local move = hum.MoveDirection
+		if move.Magnitude > 0 then
+			char:TranslateBy(move * fly.speed * k)
+		end
+		local vert = (fly.up and 1 or 0) - (fly.down and 1 or 0)
+		if vert ~= 0 then
+			root.CFrame = root.CFrame + Vector3.new(0, vert * k, 0)
+		end
+		local cam = workspace.CurrentCamera
+		if fly.bg and cam then fly.bg.CFrame = cam.CFrame end
+	end)
+end
+
+FlyAPI = {
+	MIN = FLY_MIN, MAX = FLY_MAX, DEFAULT = FLY_DEFAULT,
+	setSpeed = function(v) fly.speed = math.clamp(math.floor(v + 0.5), FLY_MIN, FLY_MAX) end, -- dipanggil oleh slider
+	hold = function(dir, on) -- tombol melayang ▲ (dir = 1) / ▼ (dir = -1): tahan untuk naik / turun
+		if dir > 0 then fly.up = on else fly.down = on end
+	end,
+	onChange = nil, -- bagian antarmuka menempel di sini untuk menampilkan / menyembunyikan tombol melayang
+}
+
+-- mati / respawn: otomatis diterapkan lagi ke karakter baru
+player.CharacterAdded:Connect(function(char)
+	local hum = char:WaitForChild("Humanoid", 10)
+	if not hum then return end
+	if godOn then startGod(hum) end
+	if speedOn then startSpeed(hum) end
+	if jumpOn then startJump(hum) end
+	if fullOn then startFull(hum) end
+	if invisOn then startInvis(char, hum) end
+	if fly.on then -- jika Terbang aktif, terbang lagi dengan karakter baru
+		table.clear(fly.saved)
+		flyClean()
+		char:WaitForChild("HumanoidRootPart", 5)
+		char:WaitForChild("Animate", 3)
+		if fly.on and player.Character == char then startFly(char, hum) end
+	end
+end)
+
+
+----------------------------------------------------------------
+-- LOGIKA: Boost FPS 120 (menurunkan grafis berat + membuka batas 120 FPS)
+----------------------------------------------------------------
+local Lighting = game:GetService("Lighting")
+local FPS_TARGET = 120
+local fpsOn = false
+local fpsSaved = { effects = setmetatable({}, { __mode = "k" }), particles = setmetatable({}, { __mode = "k" }) }
+local fpsConn, fpsLightingOrig, fpsQualityOrig = nil, nil, nil
+local FPS_EFFECT_CLASSES = { "BlurEffect", "BloomEffect", "SunRaysEffect", "ColorCorrectionEffect", "DepthOfFieldEffect", "Atmosphere" }
+local FPS_PARTICLE_CLASSES = { "ParticleEmitter", "Trail", "Smoke", "Fire", "Sparkles" }
+
+local function fpsIsClass(obj, list)
+	for _, c in ipairs(list) do
+		if obj:IsA(c) then return true end
+	end
+	return false
+end
+
+local function fpsStrip(obj)
+	if fpsIsClass(obj, FPS_EFFECT_CLASSES) then
+		if fpsSaved.effects[obj] == nil then fpsSaved.effects[obj] = obj.Enabled end
+		pcall(function() obj.Enabled = false end)
+	elseif fpsIsClass(obj, FPS_PARTICLE_CLASSES) then
+		if fpsSaved.particles[obj] == nil then fpsSaved.particles[obj] = obj.Enabled end
+		pcall(function() obj.Enabled = false end)
+	end
+end
+
+local function fpsCap(n)
+	pcall(function()
+		if setfpscap then setfpscap(n) end
+	end)
+end
+
+local function startFps()
+	-- 1) Buka batas FPS (hanya berjalan jika executor mendukung setfpscap)
+	fpsCap(FPS_TARGET)
+	-- 2) Turunkan grafis: matikan bayangan, efek post-processing, partikel/asap/api
+	fpsLightingOrig = fpsLightingOrig or { shadows = Lighting.GlobalShadows }
+	pcall(function() Lighting.GlobalShadows = false end)
+	pcall(function()
+		fpsQualityOrig = fpsQualityOrig or settings().Rendering.QualityLevel
+		settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+	end)
+	for _, d in ipairs(Lighting:GetDescendants()) do fpsStrip(d) end
+	for _, d in ipairs(workspace:GetDescendants()) do fpsStrip(d) end
+	-- 3) Efek baru yang muncul saat fitur aktif juga langsung dimatikan
+	if fpsConn then fpsConn:Disconnect() end
+	fpsConn = workspace.DescendantAdded:Connect(function(d)
+		if fpsOn then fpsStrip(d) end
+	end)
+end
+
+local function stopFps()
+	if fpsConn then fpsConn:Disconnect() fpsConn = nil end
+	fpsCap(60)
+	if fpsLightingOrig then
+		pcall(function() Lighting.GlobalShadows = fpsLightingOrig.shadows end)
+		fpsLightingOrig = nil
+	end
+	if fpsQualityOrig then
+		pcall(function() settings().Rendering.QualityLevel = fpsQualityOrig end)
+		fpsQualityOrig = nil
+	end
+	for obj, was in pairs(fpsSaved.effects) do
+		if obj.Parent then pcall(function() obj.Enabled = was end) end
+	end
+	for obj, was in pairs(fpsSaved.particles) do
+		if obj.Parent then pcall(function() obj.Enabled = was end) end
+	end
+	table.clear(fpsSaved.effects)
+	table.clear(fpsSaved.particles)
+end
+
+
+----------------------------------------------------------------
+-- PASANG LOGIKA DI SINI (nama = teks di tombol, on = true/false)
+----------------------------------------------------------------
+Callbacks = {
+	["Jump Power"] = function(on)
+		jumpOn = on
+		local hum = getHumanoid()
+		if on then
+			if hum then startJump(hum) end
+		else
+			stopJump(hum)
+		end
+	end,
+	["Full Health"] = function(on)
+		fullOn = on
+		local hum = getHumanoid()
+		if on then
+			if hum then startFull(hum) end
+		else
+			stopFull()
+		end
+	end,
+	["God Mode"] = function(on)
+		godOn = on
+		local hum = getHumanoid()
+		if on then
+			if hum then startGod(hum) end
+		else
+			stopGod(hum)
+		end
+	end,
+	["Speed Hack"] = function(on)
+		speedOn = on
+		local hum = getHumanoid()
+		if on then
+			if hum then startSpeed(hum) end
+		else
+			stopSpeed(hum)
+		end
+	end,
+	["Tak Terlihat"] = function(on)
+		invisOn = on
+		local char = player.Character
+		if on then
+			if char then startInvis(char, getHumanoid()) end
+		else
+			stopInvis(getHumanoid())
+		end
+	end,
+	["Boost FPS 120"] = function(on)
+		fpsOn = on
+		if on then startFps() else stopFps() end
+	end,
+	["Tembus Dinding"] = function(on)
+		noclipOn = on
+		if on then
+			startNoclip()
+		else
+			stopNoclip()
+		end
+	end,
+	["Terbang (Fly)"] = function(on)
+		fly.on = on
+		local char, hum = player.Character, getHumanoid()
+		if on then
+			if char and hum then startFly(char, hum) end
+			flyLoop(true)
+		else
+			flyLoop(false)
+			stopFly(hum)
+		end
+		if FlyAPI.onChange then FlyAPI.onChange(on) end
+	end,
+	["ESP Pemain"] = function(on)
+		espHL = on
+		espRefresh()
+	end,
+	["ESP Nama"] = function(on)
+		espName = on
+		espRefresh()
+	end,
+	["ESP Darah"] = function(on)
+		espHP = on
+		espRefresh()
+	end,
+	["ESP Jarak"] = function(on)
+		espDist = on
+		espRefresh()
+	end,
+	["ESP Peti"] = function(on)
+		chestOn = on
+		chestRefresh()
+	end,
+	-- ["Support"] = function() print("Tombol dukung kanal") end,
+}
+end -- akhir blok logika
+
+local State = {} -- State["God Mode"] = true/false
+local Groups = {} -- Groups["Player"] = { "God Mode", "Speed Hack", ... }
+
+----------------------------------------------------------------
+-- Warna & font
+----------------------------------------------------------------
+-- Palet UI: abu-abu graphite & perak (tidak ada lagi warna pelangi)
+local PANEL = Color3.fromRGB(30, 31, 35)
+local ROW = Color3.fromRGB(41, 43, 48)
+local ROWLINE = Color3.fromRGB(112, 117, 127)
+local OFF = Color3.fromRGB(62, 65, 72)
+local TEXT = Color3.fromRGB(236, 238, 241)
+local MUTED = Color3.fromRGB(158, 163, 173)
+local LINE = Color3.fromRGB(58, 61, 68)
+
+local F_REG, F_MED, F_BOLD = Enum.Font.SourceSans, Enum.Font.SourceSansSemibold, Enum.Font.SourceSansBold
+
+-- Ukuran teks menu utama: TEXT_SCALE = 3 → semua teks di menu utama 3x lipat ukuran asli.
+-- Roblox membatasi TextSize maksimum 100, jadi teks berukuran asli di atas 33 akan berhenti di 100.
+local TEXT_SCALE = 3
+local function ts(n)
+	return math.min(100, math.floor(n * TEXT_SCALE + 0.5))
+end
+local SMALL = ts(22) -- ukuran keterangan di judul, mis. "(Farming)"
+
+local THEME_NAMES = { "Abu-abu", "Perak", "Biru Baja", "Hijau Sage" }
+local THEMES = {
+	["Abu-abu"] = { Color3.fromRGB(122, 128, 140), Color3.fromRGB(206, 211, 220) },
+	["Perak"] = { Color3.fromRGB(150, 155, 166), Color3.fromRGB(236, 238, 242) },
+	["Biru Baja"] = { Color3.fromRGB(92, 118, 150), Color3.fromRGB(176, 198, 224) },
+	["Hijau Sage"] = { Color3.fromRGB(104, 132, 116), Color3.fromRGB(178, 205, 188) },
+}
+local theme = { accent = THEMES["Abu-abu"][1], accent2 = THEMES["Abu-abu"][2] }
+local themeFns = {}
+
+local function themed(fn)
+	fn()
+	table.insert(themeFns, fn)
+end
+
+local function applyTheme(name)
+	local t = THEMES[name]
+	theme.accent, theme.accent2 = t[1], t[2]
+	for _, fn in ipairs(themeFns) do
+		fn()
+	end
+end
+
+----------------------------------------------------------------
+-- Fungsi bantu
+----------------------------------------------------------------
+local function new(class, props, parent)
+	local o = Instance.new(class)
+	for k, v in pairs(props) do
+		o[k] = v
+	end
+	o.Parent = parent
+	return o
+end
+
+local function corner(o, r)
+	return new("UICorner", { CornerRadius = UDim.new(0, r) }, o)
+end
+
+local function stroke(o, color, th, trans)
+	return new("UIStroke", { Color = color, Thickness = th or 1, Transparency = trans or 0 }, o)
+end
+
+local function pad(o, t, r, b, l)
+	return new("UIPadding", {
+		PaddingTop = UDim.new(0, t), PaddingRight = UDim.new(0, r),
+		PaddingBottom = UDim.new(0, b), PaddingLeft = UDim.new(0, l),
+	}, o)
+end
+
+local function list(o, gap, order)
+	return new("UIListLayout", { Padding = UDim.new(0, gap), SortOrder = order or Enum.SortOrder.LayoutOrder }, o)
+end
+
+local function label(parent, props, keepSize)
+	local p = {
+		BackgroundTransparency = 1, Font = F_MED, TextColor3 = TEXT, TextSize = 16,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}
+	for k, v in pairs(props) do
+		p[k] = v
+	end
+	if not keepSize then
+		p.TextSize = ts(p.TextSize) -- kalikan ukuran teks (keepSize = true berarti dibiarkan)
+	end
+	return new("TextLabel", p, parent)
+end
+
+----------------------------------------------------------------
+-- Jendela utama
+----------------------------------------------------------------
+local W, H = 2600, 1640 -- lebar, tinggi menu utama (sudah diperlebar untuk teks 3x; menu otomatis mengecil agar pas di layar)
+local SIDE_W = 680 -- lebar bilah samping
+local HEAD, FOOT = 200, 90 -- tinggi bagian kepala / kaki menu
+local MARG = 24 -- jarak antar blok
+local BODY_TOP, BOT = HEAD + 20, FOOT + 20
+
+local gui = new("ScreenGui", {
+	Name = "VuDongScriptUI", ResetOnSpawn = false, IgnoreGuiInset = true,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 100,
+}, player:WaitForChild("PlayerGui"))
+
+local main = new("Frame", {
+	Name = "Main", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(W, H), BackgroundColor3 = Color3.new(1, 1, 1),
+}, gui)
+corner(main, 44)
+new("UIGradient", {
+	Rotation = 90,
+	Color = ColorSequence.new(Color3.fromRGB(42, 44, 49), Color3.fromRGB(22, 23, 26)),
+}, main)
+
+-- Gradien logam abu-abu / perak (gelap → terang → gelap, diulang agar putarannya mulus)
+local METAL = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(78, 82, 90)),
+	ColorSequenceKeypoint.new(0.25, Color3.fromRGB(196, 200, 208)),
+	ColorSequenceKeypoint.new(0.5, Color3.fromRGB(78, 82, 90)),
+	ColorSequenceKeypoint.new(0.75, Color3.fromRGB(196, 200, 208)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(78, 82, 90)),
+})
+
+-- bingkai menu utama: gradien logam abu-abu berputar pelan + berdenyut halus
+-- (stroke dibiarkan putih agar warna gradien logam tampil dengan benar)
+local mainStroke = new("UIStroke", {
+	Color = Color3.new(1, 1, 1), Thickness = 5, Transparency = 0.55,
+	ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+}, main)
+local mainGradient = new("UIGradient", { Color = METAL }, mainStroke)
+TweenService:Create(mainGradient, TweenInfo.new(10, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), { Rotation = 360 }):Play()
+TweenService:Create(mainStroke, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { Transparency = 0.2 }):Play()
+
+-- otomatis mengecil agar pas di layar HP
+local uiScale = new("UIScale", {}, main)
+local function rescale()
+	local v = camera.ViewportSize
+	uiScale.Scale = math.clamp(math.min((v.X - 16) / W, (v.Y - 16) / H), 0.1, 1)
+end
+rescale()
+camera:GetPropertyChangedSignal("ViewportSize"):Connect(rescale)
+
+-- Tab persegi Sembunyi / Tampil menu utama (selalu terlihat, bisa diseret)
+local TAB = 56
+local TAB_BG = Color3.fromRGB(30, 31, 35)
+local toggleTab = new("TextButton", {
+	Name = "ToggleTab", Text = "", AutoButtonColor = false, ZIndex = 50,
+	Position = UDim2.new(0, 12, 0.5, -TAB / 2), Size = UDim2.fromOffset(TAB, TAB),
+	BackgroundColor3 = TAB_BG,
+}, gui)
+corner(toggleTab, 12)
+
+-- bingkai tipis logam (stroke dibiarkan putih agar warna gradien tampil dengan benar)
+local tabStroke = new("UIStroke", {
+	Color = Color3.new(1, 1, 1), Thickness = 1.5, Transparency = 0.3,
+	ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+}, toggleTab)
+local tabGradient = new("UIGradient", { Color = METAL }, tabStroke)
+
+-- lingkaran cahaya perak di luar bingkai, berdenyut mengikuti ritme
+local halo = new("Frame", {
+	Name = "Halo", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.new(1, 4, 1, 4), BackgroundTransparency = 1, ZIndex = 49,
+}, toggleTab)
+corner(halo, 14)
+local haloStroke = new("UIStroke", {
+	Color = Color3.new(1, 1, 1), Thickness = 2, Transparency = 0.85,
+	ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+}, halo)
+local haloGradient = new("UIGradient", { Color = METAL }, haloStroke)
+
+-- efek: gradien logam berputar terus-menerus + bingkai / cahaya berdenyut halus
+local SPIN = TweenInfo.new(9, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1)
+local PULSE = TweenInfo.new(2.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+TweenService:Create(tabGradient, SPIN, { Rotation = 360 }):Play()
+TweenService:Create(haloGradient, SPIN, { Rotation = 360 }):Play()
+TweenService:Create(tabStroke, PULSE, { Transparency = 0.2 }):Play()
+TweenService:Create(haloStroke, PULSE, { Transparency = 0.35, Thickness = 5 }):Play()
+
+label(toggleTab, { Text = "👑", TextSize = 26, Font = F_BOLD, TextXAlignment = Enum.TextXAlignment.Center,
+	ZIndex = 51, Position = UDim2.fromOffset(0, 4), Size = UDim2.new(1, 0, 0, 30) }, true) -- true = ukuran teks dibiarkan (tab kecil tidak dikalikan)
+local tabText = label(toggleTab, { Text = "TUTUP", TextSize = 13, Font = F_BOLD, TextXAlignment = Enum.TextXAlignment.Center,
+	ZIndex = 51, Position = UDim2.fromOffset(0, 36), Size = UDim2.new(1, 0, 0, 14) }, true)
+
+local function paintTab()
+	local isOpen = main.Visible
+	tabText.Text = isOpen and "TUTUP" or "BUKA"
+	tabText.TextColor3 = theme.accent2
+	toggleTab.BackgroundColor3 = isOpen and theme.accent:Lerp(TAB_BG, 0.7) or TAB_BG
+end
+themed(paintTab)
+
+local function setOpen(v)
+	main.Visible = v
+	paintTab()
+end
+
+-- jaga tab tetap di dalam layar
+local function clampTab(p)
+	local v = gui.AbsoluteSize
+	toggleTab.Position = UDim2.fromOffset(
+		math.clamp(p.X, 0, math.max(0, v.X - TAB)),
+		math.clamp(p.Y, 0, math.max(0, v.Y - TAB))
+	)
+end
+gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+	clampTab(toggleTab.AbsolutePosition)
+end)
+
+-- seret tab (bergerak > 6px dihitung seret, bukan klik)
+local tabDrag, tabMoved, tabInputStart, tabPosStart = false, false, nil, nil
+toggleTab.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		tabDrag, tabMoved = true, false
+		tabInputStart, tabPosStart = input.Position, toggleTab.AbsolutePosition
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then tabDrag = false end
+		end)
+	end
+end)
+UserInputService.InputChanged:Connect(function(input)
+	if tabDrag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		local d = input.Position - tabInputStart
+		if d.Magnitude > 6 then tabMoved = true end
+		if tabMoved then
+			clampTab(tabPosStart + Vector2.new(d.X, d.Y))
+		end
+	end
+end)
+toggleTab.Activated:Connect(function()
+	if tabMoved then
+		tabMoved = false
+		return
+	end
+	setOpen(not main.Visible)
+end)
+UserInputService.InputBegan:Connect(function(input, processed)
+	if not processed and input.KeyCode == Enum.KeyCode.RightShift then
+		setOpen(not main.Visible)
+	end
+end)
+
+----------------------------------------------------------------
+-- Header
+----------------------------------------------------------------
+local header = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, HEAD) }, main)
+new("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1) }) }, new("Frame", { BackgroundColor3 = Color3.fromRGB(150, 156, 168), BorderSizePixel = 0, Position = UDim2.fromOffset(0, HEAD), Size = UDim2.new(1, 0, 0, 3) }, main))
+
+label(header, { Text = "👑", TextSize = 52, Font = F_BOLD, TextXAlignment = Enum.TextXAlignment.Center,
+	Position = UDim2.fromOffset(30, 40), Size = UDim2.fromOffset(130, 120) })
+
+local title = label(header, { RichText = true, TextSize = 42, Font = F_BOLD,
+	Position = UDim2.fromOffset(176, 12), Size = UDim2.fromOffset(960, 112) })
+local subtitle = label(header, { Text = "Main Game Jadi Mudah - Pengalaman Terbaik", TextSize = 21,
+	Position = UDim2.fromOffset(176, 122), Size = UDim2.fromOffset(1300, 70) })
+themed(function()
+	title.Text = "Vu Dong Script"
+	subtitle.TextColor3 = theme.accent2
+end)
+
+local badge = new("Frame", {
+	BackgroundColor3 = Color3.fromRGB(150, 156, 168), BackgroundTransparency = 0.88,
+	Position = UDim2.new(1, -1030, 0, 25), Size = UDim2.fromOffset(700, 150),
+}, header)
+corner(badge, 75)
+local badgeStroke = stroke(badge, theme.accent, 3, 0)
+themed(function() badgeStroke.Color = theme.accent end)
+label(badge, { Text = "🚀", TextSize = 30, Font = F_BOLD, TextXAlignment = Enum.TextXAlignment.Center,
+	Position = UDim2.fromOffset(20, 0), Size = UDim2.fromOffset(110, 150) })
+label(badge, { Text = "Versi Terbaru", TextSize = 19, Font = F_BOLD,
+	Position = UDim2.fromOffset(140, 12), Size = UDim2.fromOffset(550, 66) })
+label(badge, { Text = "Tanpa Key - Gratis", TextSize = 18, TextColor3 = MUTED,
+	Position = UDim2.fromOffset(140, 80), Size = UDim2.fromOffset(550, 62) })
+
+local function headerBtn(text, x)
+	local b = new("TextButton", {
+		Text = text, TextSize = ts(36), Font = F_BOLD, BackgroundTransparency = 1,
+		Position = UDim2.new(1, -x, 0, 45), Size = UDim2.fromOffset(110, 110),
+	}, header)
+	themed(function() b.TextColor3 = theme.accent2 end)
+	b.Activated:Connect(function() setOpen(false) end)
+end
+headerBtn("–", 300)
+headerBtn("✕", 160)
+
+-- seret jendela
+local dragging, dragStart, startPos
+header.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging, dragStart, startPos = true, input.Position, main.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then dragging = false end
+		end)
+	end
+end)
+UserInputService.InputChanged:Connect(function(input)
+	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		local d = (input.Position - dragStart) / uiScale.Scale
+		main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+	end
+end)
+
+----------------------------------------------------------------
+-- Footer + bilah status
+----------------------------------------------------------------
+local footer = new("Frame", {
+	BackgroundTransparency = 1, AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, FOOT),
+}, main)
+new("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0), NumberSequenceKeypoint.new(1, 1) }) }, new("Frame", { BackgroundColor3 = Color3.fromRGB(150, 156, 168), BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 3) }, footer))
+local dot = new("Frame", { BackgroundColor3 = Color3.fromRGB(120, 200, 150), Position = UDim2.fromOffset(40, 30), Size = UDim2.fromOffset(30, 30) }, footer)
+corner(dot, 15)
+TweenService:Create(dot, TweenInfo.new(1.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { BackgroundTransparency = 0.65 }):Play()
+local statusLabel = label(footer, { RichText = true, TextSize = 21, TextColor3 = MUTED,
+	Position = UDim2.fromOffset(92, 0), Size = UDim2.fromOffset(1540, FOOT) })
+local tagline = label(footer, { Text = "Main cerdas - Menang dengan mudah!", TextSize = 21, Font = Enum.Font.SourceSansItalic,
+	TextXAlignment = Enum.TextXAlignment.Right, AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, -40, 0, 0), Size = UDim2.fromOffset(920, FOOT) })
+
+local statusText, statusToken = "Siap", 0
+local function renderStatus()
+	statusLabel.Text = "Status: " .. statusText
+	tagline.TextColor3 = theme.accent2
+end
+themed(renderStatus)
+
+local function setStatus(text)
+	statusToken += 1
+	local my = statusToken
+	statusText = text
+	renderStatus()
+	task.delay(1.8, function()
+		if statusToken == my then
+			statusText = "Siap"
+			renderStatus()
+		end
+	end)
+end
+
+----------------------------------------------------------------
+-- Komponen: card, baris, sakelar, dropdown
+----------------------------------------------------------------
+-- Bingkai logam abu-abu / perak: gradien berputar pelan + bingkai berdenyut halus
+-- (stroke dibiarkan putih agar warna gradien logam tampil dengan benar)
+local function metalStroke(o, thickness)
+	local st = new("UIStroke", {
+		Color = Color3.new(1, 1, 1), Thickness = thickness or 3, Transparency = 0.35,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	}, o)
+	local g = new("UIGradient", { Color = METAL }, st)
+	TweenService:Create(g, TweenInfo.new(10, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), { Rotation = 360 }):Play()
+	TweenService:Create(st, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), { Transparency = 0.2 }):Play()
+	return st
+end
+
+-- ganti bingkai kartu fitur (card) dengan bingkai logam
+local function metalCard(c)
+	local old = c:FindFirstChildOfClass("UIStroke")
+	if old then old:Destroy() end
+	return metalStroke(c, 3)
+end
+
+local function card(parent, order, icon, titleRich, subtitleText, color, titleColor)
+	local c = new("Frame", {
+		BackgroundColor3 = PANEL, BackgroundTransparency = 0.1, LayoutOrder = order,
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+	}, parent)
+	corner(c, 32)
+	new("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(184, 187, 195)) }, c)
+	stroke(c, ROWLINE, 3, 0.1)
+	pad(c, 30, 30, 30, 30)
+	list(c, 20)
+	local h = new("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 180), LayoutOrder = 0 }, c)
+	label(h, { Text = icon, TextSize = 40, Font = F_BOLD, TextXAlignment = Enum.TextXAlignment.Center, Size = UDim2.fromOffset(130, 180) })
+	local tl = label(h, { RichText = true, Text = titleRich, TextSize = 32, Font = F_BOLD, TextColor3 = titleColor or theme.accent2,
+		Position = UDim2.fromOffset(150, 4), Size = UDim2.new(1, -150, 0, 108) })
+	if not titleColor then themed(function() tl.TextColor3 = theme.accent2 end) end
+	label(h, { Text = subtitleText, TextSize = 19, TextColor3 = MUTED, TextTruncate = Enum.TextTruncate.AtEnd,
+		Position = UDim2.fromOffset(150, 112), Size = UDim2.new(1, -150, 0, 66) })
+	return c
+end
+
+local ROW_H = 130 -- tinggi tiap baris fitur
+
+local function row(parent, order, icon, text, rightWidth)
+	local r = new("Frame", { BackgroundColor3 = ROW, BackgroundTransparency = 0.1, LayoutOrder = order, Size = UDim2.new(1, 0, 0, ROW_H) }, parent)
+	corner(r, 26)
+	stroke(r, ROWLINE, 2, 0.6)
+	label(r, { Text = icon, TextSize = 34, Font = F_BOLD, TextXAlignment = Enum.TextXAlignment.Center,
+		Position = UDim2.fromOffset(14, 0), Size = UDim2.fromOffset(120, ROW_H) })
+	label(r, { Text = text, TextSize = 28, TextTruncate = Enum.TextTruncate.AtEnd,
+		Position = UDim2.fromOffset(150, 0), Size = UDim2.new(1, -(150 + rightWidth), 1, 0) })
+	return r
+end
+
+local function toggle(parent, order, icon, text, default, group)
+	local r = row(parent, order, icon, text, 240)
+	State[text] = default
+	if group then
+		Groups[group] = Groups[group] or {}
+		table.insert(Groups[group], text)
+	end
+	local sw = new("TextButton", {
+		Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -32, 0.5, 0), Size = UDim2.fromOffset(180, 96), BackgroundColor3 = OFF,
+	}, r)
+	corner(sw, 48)
+	local knob = new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(76, 76), BackgroundColor3 = Color3.new(1, 1, 1) }, sw)
+	corner(knob, 38)
+
+	local function paint(animate)
+		local on = State[text]
+		local info = TweenInfo.new(animate and 0.18 or 0)
+		TweenService:Create(sw, info, { BackgroundColor3 = on and theme.accent or OFF }):Play()
+		TweenService:Create(knob, info, {
+			Position = on and UDim2.new(1, -86, 0.5, 0) or UDim2.new(0, 10, 0.5, 0),
+			BackgroundColor3 = on and Color3.new(1, 1, 1) or Color3.fromRGB(176, 180, 190),
+		}):Play()
+	end
+	themed(function() paint(false) end)
+
+	sw.Activated:Connect(function()
+		State[text] = not State[text]
+		paint(true)
+		setStatus((State[text] and "Aktif: " or "Nonaktif: ") .. text)
+		local cb = Callbacks[text]
+		if cb then task.spawn(cb, State[text]) end
+	end)
+	return r
+end
+
+local function dropdown(parent, order, icon, text, options, default, onChange)
+	local r = row(parent, order, icon, text, 600)
+	local btn = new("TextButton", {
+		Text = default .. "  ▾", TextSize = ts(24), Font = F_MED, TextColor3 = TEXT, AutoButtonColor = false,
+		BackgroundColor3 = Color3.fromRGB(34, 36, 41), AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -24, 0.5, 0), Size = UDim2.fromOffset(520, 104),
+	}, r)
+	corner(btn, 22)
+	stroke(btn, ROWLINE, 2, 0.5)
+
+	local menu = new("Frame", {
+		Visible = false, ZIndex = 20, AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, 0, 0, -8),
+		Size = UDim2.fromOffset(520, #options * 104 + 16), BackgroundColor3 = Color3.fromRGB(34, 36, 41),
+	}, btn)
+	corner(menu, 22)
+	local ms = stroke(menu, theme.accent, 2, 0)
+	themed(function() ms.Color = theme.accent end)
+	pad(menu, 8, 8, 8, 8)
+	list(menu, 0)
+	for i, o in ipairs(options) do
+		local ob = new("TextButton", {
+			Text = o, TextSize = ts(24), Font = F_MED, TextColor3 = TEXT, BackgroundTransparency = 1,
+			ZIndex = 21, LayoutOrder = i, Size = UDim2.new(1, 0, 0, 104),
+		}, menu)
+		ob.Activated:Connect(function()
+			btn.Text = o .. "  ▾"
+			menu.Visible = false
+			onChange(o)
+		end)
+	end
+	btn.Activated:Connect(function() menu.Visible = not menu.Visible end)
+end
+
+local function slider(parent, order, icon, text, minV, maxV, default, onChange)
+	local SH = 260 -- tinggi baris: separuh atas = nama + angka, separuh bawah = slider
+	local r = new("Frame", { BackgroundColor3 = ROW, BackgroundTransparency = 0.1, LayoutOrder = order, Size = UDim2.new(1, 0, 0, SH) }, parent)
+	corner(r, 26)
+	stroke(r, ROWLINE, 2, 0.6)
+	label(r, { Text = icon, TextSize = 34, Font = F_BOLD, TextXAlignment = Enum.TextXAlignment.Center,
+		Position = UDim2.fromOffset(14, 0), Size = UDim2.fromOffset(120, 130) })
+	label(r, { Text = text, TextSize = 28, TextTruncate = Enum.TextTruncate.AtEnd,
+		Position = UDim2.fromOffset(150, 0), Size = UDim2.new(1, -(150 + 360), 0, 130) })
+	local valueLabel = label(r, { Text = tostring(default), TextSize = 30, Font = F_BOLD,
+		TextXAlignment = Enum.TextXAlignment.Right, AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -32, 0, 0), Size = UDim2.fromOffset(320, 130) })
+	themed(function() valueLabel.TextColor3 = theme.accent2 end)
+
+	local BTN, CY = 110, 195 -- ukuran tombol -/+ dan titik tengah vertikal slider
+	local function stepBtn(txt, anchorX, x)
+		local b = new("TextButton", {
+			Text = txt, TextSize = ts(30), Font = F_BOLD, TextColor3 = TEXT, AutoButtonColor = false,
+			BackgroundColor3 = OFF, BorderSizePixel = 0, AnchorPoint = Vector2.new(anchorX, 0.5),
+			Position = UDim2.new(anchorX, x, 0, CY), Size = UDim2.fromOffset(BTN, BTN),
+		}, r)
+		corner(b, 28)
+		return b
+	end
+	local minus = stepBtn("−", 0, 150)
+	local plus = stepBtn("+", 1, -32)
+
+	-- area sentuh (lebih tinggi dari bar agar mudah digeser dengan jari)
+	local hit = new("TextButton", {
+		Text = "", AutoButtonColor = false, BackgroundTransparency = 1, BorderSizePixel = 0, AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 150 + BTN + 50, 0, CY), Size = UDim2.new(1, -(150 + BTN + 50 + 32 + BTN + 50), 0, 130),
+	}, r)
+	local track = new("Frame", {
+		BackgroundColor3 = OFF, BorderSizePixel = 0, AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.fromScale(0, 0.5), Size = UDim2.new(1, 0, 0, 28),
+	}, hit)
+	corner(track, 14)
+	local fill = new("Frame", { BorderSizePixel = 0, Size = UDim2.fromScale(0, 1) }, track)
+	corner(fill, 14)
+	local knob = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(72, 72),
+		BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 2,
+	}, track)
+	corner(knob, 36)
+	themed(function() fill.BackgroundColor3 = theme.accent end)
+
+	local value = math.clamp(default, minV, maxV)
+	local function render()
+		local a = (value - minV) / (maxV - minV)
+		fill.Size = UDim2.fromScale(a, 1)
+		knob.Position = UDim2.fromScale(a, 0.5)
+		valueLabel.Text = tostring(value)
+	end
+	local function set(v)
+		value = math.clamp(math.floor(v + 0.5), minV, maxV)
+		render()
+		onChange(value)
+	end
+	render()
+
+	minus.Activated:Connect(function() set(value - 1) end)
+	plus.Activated:Connect(function() set(value + 1) end)
+
+	local function setFromX(x)
+		local a = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+		set(minV + a * (maxV - minV))
+	end
+	local sliding = false
+	local scroller = parent:FindFirstAncestorOfClass("ScrollingFrame")
+	hit.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			sliding = true
+			if scroller then scroller.ScrollingEnabled = false end -- saat menyeret, halaman tidak ikut scroll
+			setFromX(input.Position.X)
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					sliding = false
+					if scroller then scroller.ScrollingEnabled = true end
+				end
+			end)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			setFromX(input.Position.X)
+		end
+	end)
+end
+
+----------------------------------------------------------------
+-- Halaman: SETIAP TAB ADALAH SATU HALAMAN TERPISAH
+----------------------------------------------------------------
+local TABS = {
+	{ "🏠", "Informasi" }, { "💎", "Batu Permata" }, { "🤖", "Otomatis" }, { "👤", "Player" }, { "👁️", "ESP" }, { "🎚️", "Pengaturan" },
+}
+
+local pages, navByName = {}, {}
+
+local function newPage(name)
+	local p = new("ScrollingFrame", {
+		Name = name, Visible = false, BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 16,
+		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		Position = UDim2.fromOffset(SIDE_W + MARG * 2, BODY_TOP), Size = UDim2.new(1, -(SIDE_W + MARG * 3), 1, -(BODY_TOP + BOT)),
+	}, main)
+	pad(p, 4, 30, 4, 4)
+	list(p, 28)
+	pages[name] = p
+	return p
+end
+
+local function showTab(name)
+	local page = pages[name]
+	local wasVisible = page.Visible
+	for n, p in pairs(pages) do
+		if n ~= name and p.Visible then
+			p:SetAttribute("SavedScrollY", p.CanvasPosition.Y) -- ingat posisi scroll tab yang akan ditinggalkan
+		end
+		p.Visible = (n == name)
+	end
+	if not wasVisible then
+		-- kembali ke tab lama: kembalikan posisi scroll (pertama kali masuk tab ada di bagian atas)
+		local y = page:GetAttribute("SavedScrollY") or 0
+		page.CanvasPosition = Vector2.new(0, y)
+		-- halaman yang baru tampil mungkin belum selesai menghitung panjang isi sehingga terjepit ke 0: set ulang beberapa frame pertama
+		task.spawn(function()
+			for _ = 1, 3 do
+				task.wait()
+				if not page.Visible or math.abs(page.CanvasPosition.Y - y) < 1 then return end
+				page.CanvasPosition = Vector2.new(0, y)
+			end
+		end)
+	end
+	for n, b in pairs(navByName) do
+		b.BackgroundTransparency = (n == name) and 0 or 1
+	end
+end
+
+-- Tab: Player
+local playerCard = card(newPage("Player"), 1, "👤", 'Player <font size="' .. SMALL .. '">(Karakter)</font>', "Optimalkan kekuatan karakter", Color3.fromRGB(34, 211, 160))
+metalCard(playerCard)
+toggle(playerCard, 1, "🛡️", "God Mode", false, "Player")
+toggle(playerCard, 2, "🏃", "Speed Hack", false, "Player")
+slider(playerCard, 3, "⚡", "Kecepatan Lari", SPEED_MIN, SPEED_MAX, SPEED_DEFAULT, function(v)
+	setSpeedValue(v)
+	setStatus("Kecepatan lari: " .. v)
+end)
+toggle(playerCard, 4, "⬆️", "Jump Power", false, "Player")
+slider(playerCard, 5, "🦘", "Kekuatan Lompat", JUMP_MIN, JUMP_MAX, JUMP_DEFAULT, function(v)
+	setJumpValue(v)
+	setStatus("Kekuatan lompat: " .. v)
+end)
+toggle(playerCard, 6, "💚", "Full Health", false, "Player")
+toggle(playerCard, 7, "👻", "Tak Terlihat", false, "Player")
+toggle(playerCard, 8, "🧱", "Tembus Dinding", false, "Player")
+toggle(playerCard, 9, "🕊️", "Terbang (Fly)", false, "Player")
+slider(playerCard, 10, "🚀", "Kecepatan Terbang", FlyAPI.MIN, FlyAPI.MAX, FlyAPI.DEFAULT, function(v)
+	FlyAPI.setSpeed(v)
+	setStatus("Kecepatan terbang: " .. v)
+end)
+
+-- Tombol melayang ▲ / ▼ untuk mode Terbang (tahan untuk naik / turun) - hanya tampil saat Terbang aktif, tetap bisa dipakai saat menu disembunyikan.
+-- Ditaruh dalam blok do ... end agar tidak menambah variabel local di tingkat paling luar.
+do
+	local flyBox = new("Frame", {
+		Name = "VuDongFlyButtons", BackgroundTransparency = 1, Visible = false, ZIndex = 50,
+		AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -24, 0.5, 0),
+		Size = UDim2.fromOffset(110, 240),
+	}, gui)
+	list(flyBox, 20)
+	local function flyBtn(text, order, dir)
+		local b = new("TextButton", {
+			Text = text, TextSize = 44, Font = F_BOLD, TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = false,
+			BackgroundColor3 = theme.accent, BackgroundTransparency = 0.15, LayoutOrder = order,
+			Size = UDim2.fromOffset(110, 110), ZIndex = 51,
+		}, flyBox)
+		corner(b, 26)
+		stroke(b, Color3.new(1, 1, 1), 2, 0.5)
+		themed(function() b.BackgroundColor3 = theme.accent end)
+		local held
+		b.InputBegan:Connect(function(input)
+			local t = input.UserInputType
+			if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+				held = input
+				FlyAPI.hold(dir, true)
+			end
+		end)
+		UserInputService.InputEnded:Connect(function(input)
+			if held and (input == held or (held.UserInputType == Enum.UserInputType.MouseButton1
+				and input.UserInputType == Enum.UserInputType.MouseButton1)) then
+				held = nil
+				FlyAPI.hold(dir, false)
+			end
+		end)
+	end
+	flyBtn("▲", 1, 1)
+	flyBtn("▼", 2, -1)
+	FlyAPI.onChange = function(on)
+		flyBox.Visible = on
+	end
+end
+
+-- Tab: ESP
+local espCard = card(newPage("ESP"), 1, "👁️", 'ESP <font size="' .. SMALL .. '">(Tembus Pandang)</font>', "Lihat pemain & peti menembus dinding", Color3.fromRGB(248, 113, 113))
+metalCard(espCard)
+toggle(espCard, 1, "🎯", "ESP Pemain", false, "ESP")
+toggle(espCard, 2, "🏷️", "ESP Nama", false, "ESP")
+toggle(espCard, 3, "❤️", "ESP Darah", false, "ESP")
+toggle(espCard, 4, "📏", "ESP Jarak", false, "ESP")
+toggle(espCard, 5, "📦", "ESP Peti", false, "ESP")
+dropdown(espCard, 6, "🎨", "Warna ESP", ESP_COLOR_NAMES, "Merah", function(name)
+	espColor = ESP_COLORS[name]
+	setStatus("Warna ESP: " .. name)
+end)
+
+-- Tab: Batu Permata - tombol teleport cepat ke tiap lantai.
+-- Ditaruh dalam blok do ... end agar tidak menambah variabel local di tingkat paling luar.
+-- Mau menambah / mengubah lantai: edit tabel FLOORS (nama, koordinat).
+do
+	local FLOORS = {
+		{ "Lantai 3", Vector3.new(26.79, -116.09, -170.74) },
+		{ "Lantai 4", Vector3.new(25.90, -106.92, -158.02) },
+		{ "Lantai 5", Vector3.new(17.57, -154.20, -237.69) },
+		{ "Lantai 6", Vector3.new(21.56, -190.36, -301.20) },
+		{ "Lantai 7", Vector3.new(22.76, -231.71, -374.69) },
+		{ "Lantai 8", Vector3.new(21.34, -271.92, -443.04) },
+		{ "Lantai 9", Vector3.new(26.56, -313.16, -510.27) },
+		{ "Lantai 10", Vector3.new(23.38, -348.79, -586.38) },
+		{ "Lantai 11", Vector3.new(24.94, -385.55, -653.15) },
+		{ "Lantai 12", Vector3.new(21.20, -427.52, -718.93) },
+		{ "Lantai 13", Vector3.new(26.37, -473.89, -791.87) },
+		{ "Lantai 14", Vector3.new(23.84, -509.97, -862.56) },
+		{ "Lantai 15", Vector3.new(20.65, -549.45, -936.42) },
+		{ "Lantai 16", Vector3.new(19.57, -588.53, -1006.50) },
+		{ "Lantai 17", Vector3.new(23.74, -632.11, -1072.43) },
+		{ "Lantai 18", Vector3.new(20.64, -671.65, -1139.22) },
+		{ "Lantai 19", Vector3.new(22.01, -711.53, -1213.69) },
+		{ "Lantai 20", Vector3.new(23.27, -746.78, -1283.55) },
+		{ "Lantai 21", Vector3.new(21.33, -793.25, -1354.08) },
+		{ "Lantai 22", Vector3.new(24.67, -827.80, -1422.39) },
+		{ "Lantai 23", Vector3.new(25.10, -868.72, -1493.45) },
+		{ "Lantai 24", Vector3.new(24.55, -912.73, -1565.00) },
+		{ "Lantai 25", Vector3.new(23.21, -950.42, -1630.47) },
+		{ "Lantai 26", Vector3.new(20.82, -985.08, -1708.36) },
+		{ "Lantai 27", Vector3.new(21.54, -1030.60, -1773.34) },
+		{ "Lantai 28", Vector3.new(23.10, -1071.36, -1843.68) },
+		{ "Lantai 29", Vector3.new(22.18, -1112.19, -1914.25) },
+		{ "Lantai 30", Vector3.new(19.49, -1153.46, -1986.13) },
+		{ "Lantai 31", Vector3.new(20.85, -1190.59, -2051.32) },
+		{ "Lantai 32", Vector3.new(27.82, -1233.51, -2120.45) },
+		{ "Lantai 33", Vector3.new(23.75, -1271.54, -2196.07) },
+		{ "Lantai 34", Vector3.new(21.42, -1308.70, -2266.31) },
+		{ "Lantai 35", Vector3.new(22.41, -1344.39, -2332.67) },
+		{ "Lantai 36", Vector3.new(26.74, -1384.17, -2402.03) },
+		{ "Lantai 37", Vector3.new(20.49, -1425.84, -2474.20) },
+		{ "Lantai 38", Vector3.new(26.19, -1462.30, -2542.78) },
+		{ "Lantai 39", Vector3.new(18.82, -1511.30, -2613.78) },
+		{ "Lantai 40", Vector3.new(21.17, -1545.86, -2683.87) },
+		{ "Lantai 41", Vector3.new(18.10, -1584.75, -2751.23) },
+	}
+
+	local gemCard = card(newPage("Batu Permata"), 1, "💎", 'Batu Permata <font size="' .. SMALL .. '">(Teleportasi)</font>',
+		"Klik Teleport untuk langsung menuju tiap lantai", Color3.fromRGB(56, 189, 248))
+	metalCard(gemCard)
+
+	local function teleportTo(pos)
+		local char = player.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then return false end
+		pcall(function()
+			root.AssemblyLinearVelocity = Vector3.zero -- hentikan momentum jatuh / lari agar tidak terlempar dari titik tujuan
+			root.AssemblyAngularVelocity = Vector3.zero
+		end)
+		char:PivotTo(CFrame.new(pos))
+		return true
+	end
+
+	-- Dibagi 3 kolom: tiap baris ada 3 tombol Teleport (ubah PER_ROW jika ingin jumlah tombol lain)
+	local PER_ROW, GAP = 3, 18
+	local GEM = "💎" -- label permata hiasan di depan nama lantai (ganti ikon lain atau isi "" untuk menghapus)
+	local rowFrame
+	for i, f in ipairs(FLOORS) do
+		local name, pos = f[1], f[2]
+		if (i - 1) % PER_ROW == 0 then
+			rowFrame = new("Frame", {
+				BackgroundTransparency = 1, LayoutOrder = math.ceil(i / PER_ROW),
+				Size = UDim2.new(1, 0, 0, ROW_H),
+			}, gemCard)
+			new("UIListLayout", {
+				FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, GAP),
+				VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder,
+			}, rowFrame)
+		end
+		local b = new("TextButton", {
+			Text = (GEM ~= "" and (GEM .. " ") or "") .. name, TextSize = ts(24), Font = F_BOLD, TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = true,
+			TextTruncate = Enum.TextTruncate.AtEnd, LayoutOrder = (i - 1) % PER_ROW,
+			BackgroundColor3 = theme.accent,
+			Size = UDim2.new(1 / PER_ROW, -(GAP * (PER_ROW - 1)) / PER_ROW, 0, ROW_H - 20),
+		}, rowFrame)
+		corner(b, 24)
+		themed(function() b.BackgroundColor3 = theme.accent end)
+		b.Activated:Connect(function()
+			if teleportTo(pos) then
+				setStatus("Berhasil teleport ke " .. name)
+			else
+				setStatus("Belum ada karakter untuk teleport")
+			end
+		end)
+	end
+end
+
+-- Tab: Otomatis - mengambil item otomatis berdasarkan NAMA di area sekitar koordinat tetap.
+-- Item diambil dengan MENAHAN tombol (ProximityPrompt dengan HoldDuration): script terbang mendekati objek, menahan sesuai durasi lalu melepas.
+-- Mau menambah area baru: tambahkan satu baris ke tabel AUTO_LIST (nama, teks singkat di tombol, pusat area, radius, kata kunci nama objek).
+-- Kalau tidak ada yang terambil: pakai Pengaturan → Pindai Map untuk melihat nama asli objek lalu tambahkan ke keywords.
+-- Ditaruh dalam blok do ... end agar tidak menambah variabel local di tingkat paling luar.
+do
+	local AUTO_GOTO = true -- true: saat sakelar dinyalakan, karakter dibawa ke pusat area (banyak game hanya mengizinkan mengambil saat berdiri dekat)
+	local AUTO_TICK = 0.3 -- jeda detik antar pemindaian
+	local AUTO_COOLDOWN = 1.5 -- detik tunggu sebelum mengambil objek yang sama lagi
+	-- CATATAN: kata kunci di bawah sengaja TIDAK diterjemahkan karena harus cocok dengan nama item asli di game (versi Vietnam).
+	-- Kalau game kamu berbahasa Indonesia / Inggris, tambahkan nama item sesuai bahasa game-mu ke daftar kata kunci.
+	-- kata kunci bersama untuk lantai tinggi: Hiếm Gặp (Tidak Umum) / Hiếm (Langka) / Tinh Nhuệ (Elit) / Huyền Thoại (Legenda)
+	-- (ada juga bahasa Inggris karena nama asli di game biasanya Rare / Uncommon / Common)
+	local KW_HIGH = { "hiếm gặp", "hiếm", "tinh nhuệ", "huyền thoại", "uncommon", "rare", "elite", "legendary",
+		"HIẾM GẶP", "HIẾM", "TINH NHUỆ", "HUYỀN THOẠI" }
+	-- kata kunci untuk lantai tertinggi: tambah Thần Thánh (Suci) / Cổ Xưa (Kuno)
+	local KW_TOP = { "hiếm gặp", "hiếm", "tinh nhuệ", "huyền thoại", "thần thánh", "cổ xưa",
+		"uncommon", "rare", "elite", "legendary", "divine", "ancient",
+		"HIẾM GẶP", "HIẾM", "TINH NHUỆ", "HUYỀN THOẠI", "THẦN THÁNH", "CỔ XƯA" }
+	-- kata kunci untuk lantai terakhir: tambah Vĩnh Cữu (Abadi; juga ejaan "Vĩnh Cửu") / Bất Tử (Abadi/Kebal)
+	local KW_MAX = { "hiếm gặp", "hiếm", "tinh nhuệ", "huyền thoại", "thần thánh", "cổ xưa", "vĩnh cữu", "vĩnh cửu", "bất tử",
+		"uncommon", "rare", "elite", "legendary", "divine", "ancient", "eternal", "immortal",
+		"HIẾM GẶP", "HIẾM", "TINH NHUỆ", "HUYỀN THOẠI", "THẦN THÁNH", "CỔ XƯA", "VĨNH CỮU", "VĨNH CỬU", "BẤT TỬ" }
+	-- tiap baris = satu tombol hidup / mati (short = teks di tombol). Nama yang mengandung salah satu kata kunci = objek yang akan diambil
+	local AUTO_LIST = {
+		{
+			name = "Otomatis Batu Langka + Biasa", short = "Area Awal",
+			center = Vector3.new(30.22, -115.68, -132.50), radius = 50,
+			keywords = { "hiếm", "thông thường", "rare", "common", "HIẾM", "THÔNG THƯỜNG" },
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 4 + Biasa", short = "Lantai 4",
+			center = Vector3.new(21.47, -115.68, -135.63), radius = 50,
+			keywords = { "hiếm gặp", "thông thường", "uncommon", "common", "HIẾM GẶP", "THÔNG THƯỜNG" },
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 5 + Biasa", short = "Lantai 5",
+			center = Vector3.new(18.44, -155.68, -230.64), radius = 50,
+			keywords = { "hiếm gặp", "thông thường", "uncommon", "common", "HIẾM GẶP", "THÔNG THƯỜNG" },
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 6", short = "Lantai 6",
+			center = Vector3.new(19.20, -195.68, -299.65), radius = 50,
+			keywords = { "hiếm gặp", "hiếm", "tinh nhuệ", "uncommon", "rare", "elite", "HIẾM GẶP", "HIẾM", "TINH NHUỆ" },
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 7", short = "Lantai 7",
+			center = Vector3.new(27.39, -235.68, -369.96), radius = 50,
+			keywords = { "hiếm gặp", "hiếm", "tinh nhuệ", "uncommon", "rare", "elite", "HIẾM GẶP", "HIẾM", "TINH NHUỆ" },
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 8", short = "Lantai 8",
+			center = Vector3.new(21.34, -275.68, -443.04), radius = 50,
+			keywords = KW_HIGH,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 9", short = "Lantai 9",
+			center = Vector3.new(26.56, -315.68, -510.27), radius = 50,
+			keywords = KW_HIGH,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 10", short = "Lantai 10",
+			center = Vector3.new(23.12, -395.68, -650.47), radius = 50,
+			keywords = KW_HIGH,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 11", short = "Lantai 11",
+			center = Vector3.new(24.44, -435.68, -721.20), radius = 50,
+			keywords = KW_HIGH,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 12", short = "Lantai 12",
+			center = Vector3.new(25.20, -355.68, -587.00), radius = 50,
+			keywords = KW_HIGH,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 13", short = "Lantai 13",
+			center = Vector3.new(24.50, -475.68, -794.98), radius = 50,
+			keywords = KW_HIGH,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 14", short = "Lantai 14",
+			center = Vector3.new(21.49, -515.68, -864.56), radius = 50,
+			keywords = KW_TOP,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 15", short = "Lantai 15",
+			center = Vector3.new(24.64, -555.68, -935.02), radius = 50,
+			keywords = KW_TOP,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 16", short = "Lantai 16",
+			center = Vector3.new(22.33, -595.68, -1000.71), radius = 50,
+			keywords = KW_TOP,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 17", short = "Lantai 17",
+			center = Vector3.new(21.37, -635.68, -1074.03), radius = 50,
+			keywords = KW_TOP,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 18", short = "Lantai 18",
+			center = Vector3.new(20.95, -715.68, -1211.44), radius = 50,
+			keywords = KW_MAX,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 19", short = "Lantai 19",
+			center = Vector3.new(23.17, -755.68, -1285.11), radius = 50,
+			keywords = KW_MAX,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 20", short = "Lantai 20",
+			center = Vector3.new(21.89, -675.68, -1143.12), radius = 50,
+			keywords = KW_MAX,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 21", short = "Lantai 21",
+			center = Vector3.new(21.32, -795.68, -1355.84), radius = 50,
+			keywords = KW_MAX,
+		},
+		{
+			name = "Otomatis Batu Langka Lantai 22", short = "Lantai 22",
+			center = Vector3.new(24.78, -835.68, -1424.66), radius = 50,
+			keywords = KW_MAX,
+		},
+	}
+
+	local autoCard = card(newPage("Otomatis"), 1, "🤖", 'Otomatis <font size="' .. SMALL .. '">(Ambil Batu)</font>',
+		"Otomatis mengambil batu berdasarkan nama di area sekitar koordinat", Color3.fromRGB(167, 139, 250))
+	metalCard(autoCard)
+
+	local fpp, fcd, fti = fireproximityprompt, fireclickdetector, firetouchinterest -- fungsi dari executor (kalau tidak ada, pakai cara cadangan)
+	local autos, lock = {}, false -- autos = status tiap area; lock = satu waktu hanya satu area yang mengambil (karakter hanya di satu tempat)
+
+	local function textMatch(s, kws)
+		if type(s) ~= "string" or s == "" then return false end
+		local l = string.lower(s)
+		for _, kw in ipairs(kws) do
+			if string.find(s, kw, 1, true) or string.find(l, kw, 1, true) then return true end
+		end
+		return false
+	end
+
+	-- "objek" = Model kecil yang berisi part itu (jika ada), kalau tidak ya part itu sendiri
+	local function itemOf(part)
+		local m = part.Parent
+		if m and m:IsA("Model") and #m:GetChildren() <= 40 then return m end
+		return part
+	end
+
+	-- apakah objek punya nama / label / atribut yang cocok dengan kata kunci area A
+	-- (A.cache: objek → true (jenis cocok) atau waktu pengecekan (jenis salah, dicek lagi setelah 5 detik))
+	local function isTarget(A, item)
+		local c = A.cache[item]
+		if c == true then return true end
+		if type(c) == "number" and os.clock() - c < 5 then return false end
+		local function hit(x) return textMatch(x, A.keywords) end
+		local ok, res = pcall(function()
+			if hit(item.Name) then return true end
+			local par = item.Parent -- nama folder / model induk (maksimal 3 tingkat), mis. folder "Rare"
+			for _ = 1, 3 do
+				if not par or par == workspace then break end
+				if hit(par.Name) then return true end
+				par = par.Parent
+			end
+			for _, v in pairs(item:GetAttributes()) do
+				if hit(v) then return true end
+			end
+			local n = 0
+			for _, d in ipairs(item:GetDescendants()) do
+				n += 1
+				if n > 150 then break end
+				if hit(d.Name) then return true end
+				if d:IsA("ProximityPrompt") then
+					if hit(d.ObjectText) or hit(d.ActionText) then return true end
+				elseif d:IsA("TextLabel") or d:IsA("TextButton") then
+					if hit(d.Text) then return true end
+				elseif d:IsA("StringValue") then
+					if hit(d.Value) then return true end
+				end
+			end
+			return false
+		end)
+		if ok and res then
+			A.cache[item] = true
+			return true
+		end
+		A.cache[item] = os.clock()
+		return false
+	end
+
+	-- posisi tombol ambil (ProximityPrompt)
+	local function promptPos(prompt, part)
+		local par = prompt.Parent
+		if par and par:IsA("Attachment") then return par.WorldPosition end
+		if par and par:IsA("BasePart") then return par.Position end
+		if par and par:IsA("Model") then return par:GetPivot().Position end
+		return part.Position
+	end
+
+	-- mengambil satu objek: prioritas ProximityPrompt (TAHAN) → ClickDetector → sentuh
+	-- mengembalikan: (apakah berhasil diproses, apakah karakter dipindahkan)
+	local function collect(root, part, item)
+		local prompt = item:FindFirstChildWhichIsA("ProximityPrompt", true)
+		if prompt and prompt.Enabled then
+			local moved, hold = false, prompt.HoldDuration
+			pcall(function() prompt.RequiresLineOfSight = false end) -- tetap bisa diambil meski terhalang objek lain
+			local pos = promptPos(prompt, part)
+			if (root.Position - pos).Magnitude > math.max(prompt.MaxActivationDistance - 3, 2) then
+				-- berdiri terlalu jauh dari jangkauan: terbang mendekati objek (selesai pemindaian akan kembali ke pusat area)
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.CFrame = CFrame.new(pos + Vector3.new(0, 2.5, 0))
+				moved = true
+				task.wait(0.15) -- tunggu tombol ambil muncul
+			end
+			if hold <= 0 and fpp then
+				pcall(fpp, prompt) -- tombol sekali tekan, tidak perlu ditahan
+			else
+				-- tahan sungguhan: tahan sesuai HoldDuration, kunci karakter agar tidak jatuh keluar dari jangkauan
+				pcall(function() root.Anchored = true end)
+				pcall(function()
+					prompt:InputHoldBegin()
+					task.wait(hold + 0.1)
+					prompt:InputHoldEnd()
+				end)
+				pcall(function() root.Anchored = false end)
+				if fpp and prompt.Parent and prompt.Enabled then
+					pcall(fpp, prompt) -- cadangan jika tahan belum berhasil
+				end
+			end
+			return true, moved
+		end
+		local cd = item:FindFirstChildWhichIsA("ClickDetector", true)
+		if cd and fcd then
+			pcall(fcd, cd)
+			return true, false
+		end
+		local ti = part:FindFirstChildWhichIsA("TouchInterest") or item:FindFirstChildWhichIsA("TouchInterest", true)
+		if ti or (not part.CanCollide and part.Size.Magnitude <= 12) then
+			if fti then
+				pcall(fti, root, part, 0)
+				pcall(fti, root, part, 1)
+				return true, false
+			end
+			local back = root.CFrame -- tanpa firetouchinterest: sentuh cepat lalu kembali ke tempat semula
+			root.CFrame = part.CFrame
+			task.wait(0.1)
+			root.CFrame = back
+			return true, false
+		end
+		return false, false
+	end
+
+	local function gotoCenter(A)
+		local char = player.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if root and (root.Position - A.center).Magnitude > A.radius then
+			pcall(function()
+				root.AssemblyLinearVelocity = Vector3.zero
+				char:PivotTo(CFrame.new(A.center))
+			end)
+		end
+	end
+
+	-- satu kali pemindaian area A: semua objek di area → objek yang jenisnya cocok diambil satu per satu
+	local function step(A)
+		local char = player.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then return end
+		local ok, parts = pcall(workspace.GetPartBoundsInRadius, workspace, A.center, A.radius)
+		if not ok then return end
+		local seen, movedAny = {}, false
+		for _, part in ipairs(parts) do
+			if not A.on then break end
+			if part.Parent and not part:IsDescendantOf(char) then
+				local item = itemOf(part)
+				if not seen[item] then
+					seen[item] = true
+					if (A.lastHit[item] or 0) + AUTO_COOLDOWN <= os.clock() and isTarget(A, item) then
+						A.lastHit[item] = os.clock()
+						local okc, handled, moved = pcall(collect, root, part, item)
+						if okc and moved then movedAny = true end
+					end
+				end
+			end
+		end
+		if movedAny and AUTO_GOTO then
+			pcall(function() -- setelah selesai mengambil, kembali ke pusat area
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.CFrame = CFrame.new(A.center)
+			end)
+		end
+	end
+
+	player.CharacterAdded:Connect(function()
+		task.wait(1.5)
+		if not AUTO_GOTO then return end
+		for _, A in ipairs(autos) do
+			if A.on then
+				gotoCenter(A)
+				break
+			end
+		end
+	end)
+
+	-- slider radius BERSAMA untuk semua area (geser = mengubah radius semua area)
+	slider(autoCard, 1, "📏", "Radius Area Ambil", 5, 300, 50, function(v)
+		for _, A in ipairs(autos) do A.radius = v end
+	end)
+
+	-- dibagi 3 kolom: tiap baris ada 3 tombol hidup / mati (ubah PER_ROW jika ingin jumlah tombol lain)
+	local PER_ROW, GAP = 3, 18
+	local rowFrame
+	for i, cfg in ipairs(AUTO_LIST) do
+		local A = {
+			center = cfg.center, radius = cfg.radius, keywords = cfg.keywords, on = false, run = 0, -- run bertambah tiap kali dihidupkan / dimatikan agar loop lama berhenti sendiri
+			cache = setmetatable({}, { __mode = "k" }), lastHit = setmetatable({}, { __mode = "k" }),
+		}
+		table.insert(autos, A)
+		State[cfg.name] = false
+
+		if (i - 1) % PER_ROW == 0 then
+			rowFrame = new("Frame", {
+				BackgroundTransparency = 1, LayoutOrder = 1 + math.ceil(i / PER_ROW),
+				Size = UDim2.new(1, 0, 0, ROW_H),
+			}, autoCard)
+			new("UIListLayout", {
+				FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, GAP),
+				VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder,
+			}, rowFrame)
+		end
+		local b = new("TextButton", {
+			Text = "", TextSize = ts(24), Font = F_BOLD, TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = true,
+			TextTruncate = Enum.TextTruncate.AtEnd, LayoutOrder = (i - 1) % PER_ROW,
+			BackgroundColor3 = OFF,
+			Size = UDim2.new(1 / PER_ROW, -(GAP * (PER_ROW - 1)) / PER_ROW, 0, ROW_H - 20),
+		}, rowFrame)
+		corner(b, 24)
+		themed(function() -- hidup = warna tema + tanda ✅, mati = warna gelap + 💎
+			local on = State[cfg.name]
+			b.BackgroundColor3 = on and theme.accent or OFF
+			b.Text = (on and "✅ " or "💎 ") .. cfg.short
+		end)
+		b.Activated:Connect(function()
+			State[cfg.name] = not State[cfg.name]
+			local on = State[cfg.name]
+			b.BackgroundColor3 = on and theme.accent or OFF
+			b.Text = (on and "✅ " or "💎 ") .. cfg.short
+			setStatus((on and "Aktif: " or "Nonaktif: ") .. cfg.name)
+			local cb = Callbacks[cfg.name]
+			if cb then task.spawn(cb, on) end
+		end)
+
+		Callbacks[cfg.name] = function(on)
+			A.on = on
+			A.run += 1
+			local run = A.run
+			if not on then return end
+			table.clear(A.cache)
+			table.clear(A.lastHit)
+			if AUTO_GOTO and not lock then gotoCenter(A) end
+			while A.on and run == A.run do
+				while lock and A.on and run == A.run do task.wait(0.05) end -- tunggu area lain selesai mengambil
+				if A.on and run == A.run then
+					lock = true
+					pcall(step, A)
+					lock = false
+				end
+				task.wait(AUTO_TICK)
+			end
+		end
+	end
+end
+
+-- Tab: Pengaturan
+local setCard = card(newPage("Pengaturan"), 1, "🎚️", "Pengaturan", "Atur tampilan & fitur", Color3.fromRGB(234, 179, 8))
+metalCard(setCard)
+toggle(setCard, 1, "✨", "Efek Cantik", true, "Pengaturan")
+toggle(setCard, 2, "🔊", "Suara", true, "Pengaturan")
+toggle(setCard, 3, "🔔", "Tampilkan Notifikasi", true, "Pengaturan")
+toggle(setCard, 4, "⚡", "Boost FPS 120", false, "Pengaturan")
+dropdown(setCard, 5, "🎨", "Tema Warna", THEME_NAMES, "Abu-abu", function(name)
+	applyTheme(name)
+	setStatus("Ganti tema: " .. name)
+end)
+
+-- Kartu Diagnostik (halaman Pengaturan): alat bantu menulis & men-debug script
+local Stats = game:GetService("Stats")
+local LogService = game:GetService("LogService")
+local diagMouse = player:GetMouse()
+
+local diagCard = card(setCard.Parent, 2, "🩺", "Diagnostik", "Alat bantu menulis & men-debug script", Color3.fromRGB(34, 211, 238))
+metalCard(diagCard)
+
+local diagOn, logOn = false, false
+local diagConn, logConn = nil, nil
+local diagFps, diagAcc, diagFrames = 0, 0, 0
+local LOG_MAX, LOG_SHOW = 80, 14 -- simpan maksimal 80 baris log, tampilkan 14 baris terakhir
+local logLines = {}
+local execRows = nil -- daftar fungsi executor (dihitung sekali lalu diingat)
+local lastTarget = nil -- objek 3D yang terakhir diklik / disentuh (klik pada menu tidak dihitung)
+
+local function esc(s)
+	return (tostring(s):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+end
+
+-- kotak teks multi-baris (tinggi menyesuaikan otomatis)
+local function textPanel(parent, order)
+	local f = new("Frame", {
+		BackgroundColor3 = Color3.fromRGB(34, 36, 41), LayoutOrder = order,
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+	}, parent)
+	corner(f, 22)
+	stroke(f, ROWLINE, 2, 0.5)
+	pad(f, 24, 28, 24, 28)
+	return new("TextLabel", {
+		BackgroundTransparency = 1, RichText = true, TextWrapped = true, Font = F_MED, TextColor3 = TEXT,
+		TextSize = ts(17), TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Text = "",
+	}, f)
+end
+
+-- baris dengan tombol di sisi kanan
+local function actionRow(parent, order, icon, text, btnText, fn)
+	local r = row(parent, order, icon, text, 440)
+	local b = new("TextButton", {
+		Text = btnText, TextSize = ts(22), Font = F_BOLD, TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = false,
+		AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -32, 0.5, 0), Size = UDim2.fromOffset(380, 96),
+	}, r)
+	corner(b, 48)
+	themed(function() b.BackgroundColor3 = theme.accent end)
+	b.Activated:Connect(fn)
+	return b
+end
+
+-- path yang bisa dipakai di script: workspace["Map"]["Part"] atau game:GetService("X")["Y"]
+local function pathOf(inst)
+	local parts, cur = {}, inst
+	while cur and cur ~= game do
+		table.insert(parts, 1, cur)
+		cur = cur.Parent
+	end
+	if cur ~= game then return inst:GetFullName() .. " (bukan bagian dari game)" end
+	if #parts == 0 then return "game" end
+	local s
+	if parts[1] == workspace then
+		s = "workspace"
+	else
+		s = string.format("game:GetService(%q)", parts[1].ClassName)
+	end
+	for i = 2, #parts do
+		s = s .. string.format("[%q]", parts[i].Name)
+	end
+	return s
+end
+
+local EXEC_FUNCS = {
+	"setclipboard", "setfpscap", "getgenv", "loadstring", "request", "hookfunction", "hookmetamethod",
+	"getrawmetatable", "checkcaller", "fireclickdetector", "fireproximityprompt", "firetouchinterest",
+	"firesignal", "getconnections", "getnilinstances", "readfile", "writefile", "Drawing",
+}
+
+local function getExecRows()
+	if execRows then return execRows end
+	local ok, env = pcall(function() return getfenv() end)
+	if not ok or type(env) ~= "table" then env = {} end
+	local name = "tidak diketahui (Studio atau bukan executor)"
+	if env.identifyexecutor then
+		local ok2, n = pcall(env.identifyexecutor)
+		if ok2 and n then name = tostring(n) end
+	end
+	local has, miss = {}, {}
+	for _, f in ipairs(EXEC_FUNCS) do
+		if env[f] ~= nil then table.insert(has, f) else table.insert(miss, f) end
+	end
+	execRows = {
+		{ "Executor", name },
+		{ "Fungsi tersedia", #has > 0 and table.concat(has, ", ") or "(tidak ada)" },
+		{ "Fungsi tidak ada", #miss > 0 and table.concat(miss, ", ") or "(tidak ada yang kurang)" },
+	}
+	return execRows
+end
+
+local function collectDiag()
+	local rows = {}
+	local function add(k, v) table.insert(rows, { k, tostring(v) }) end
+	add("FPS", diagOn and diagFps or "nonaktif")
+	local ping = "?"
+	pcall(function() ping = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue() + 0.5) .. " ms" end)
+	add("Ping", ping)
+	local mem = "?"
+	pcall(function() mem = string.format("%.0f MB", Stats:GetTotalMemoryUsageMb()) end)
+	add("Memori", mem)
+	add("Pemain", #Players:GetPlayers() .. "/" .. Players.MaxPlayers)
+	add("PlaceId", game.PlaceId)
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if root then
+		add("Posisi", string.format("%.1f, %.1f, %.1f", root.Position.X, root.Position.Y, root.Position.Z))
+	else
+		add("Posisi", "belum ada karakter")
+	end
+	local hum = getHumanoid()
+	if hum then
+		add("Darah", string.format("%.0f / %.0f", hum.Health, hum.MaxHealth))
+		add("WalkSpeed", hum.WalkSpeed)
+		add("Lompat", hum.UseJumpPower and ("JumpPower " .. hum.JumpPower) or ("JumpHeight " .. hum.JumpHeight))
+		add("Status", hum:GetState().Name)
+		add("RigType", hum.RigType.Name)
+	end
+	if lastTarget and lastTarget.Parent then
+		add("Objek terakhir diklik", pathOf(lastTarget) .. "  [" .. lastTarget.ClassName .. "]")
+	else
+		add("Objek terakhir diklik", "belum klik objek apa pun")
+	end
+	for _, r in ipairs(getExecRows()) do table.insert(rows, r) end
+	return rows
+end
+
+local function rowsToRich(rows)
+	local out = {}
+	for _, r in ipairs(rows) do
+		table.insert(out, string.format("%s: %s", esc(r[1]), esc(r[2])))
+	end
+	return table.concat(out, "\n")
+end
+
+-- ingat objek 3D yang terakhir diklik (klik pada menu diabaikan)
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed then return end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		task.delay(0.03, function() lastTarget = diagMouse.Target end)
+	end
+end)
+
+-- bagian 1: panel data langsung
+toggle(diagCard, 1, "📊", "Aktifkan Diagnostik", false, "Pengaturan")
+local diagLabel = textPanel(diagCard, 2)
+local DIAG_IDLE = "Diagnostik sedang nonaktif. Nyalakan sakelar di atas untuk melihat FPS, Ping, memori, posisi, darah, objek terakhir diklik, dan fungsi yang didukung executor."
+diagLabel.Text = DIAG_IDLE
+
+local function refreshDiag()
+	diagLabel.Text = rowsToRich(collectDiag())
+end
+
+Callbacks["Aktifkan Diagnostik"] = function(on)
+	diagOn = on
+	if diagConn then
+		diagConn:Disconnect()
+		diagConn = nil
+	end
+	if not on then
+		diagLabel.Text = DIAG_IDLE
+		return
+	end
+	diagFps, diagAcc, diagFrames = 0, 0, 0
+	pcall(refreshDiag)
+	diagConn = RunService.Heartbeat:Connect(function(dt)
+		diagFrames += 1
+		diagAcc += dt
+		if diagAcc >= 0.5 then
+			diagFps = math.floor(diagFrames / diagAcc + 0.5)
+			diagFrames, diagAcc = 0, 0
+			if main.Visible and pages["Pengaturan"].Visible then -- hanya diperbarui saat halaman ini sedang dilihat
+				local ok, err = pcall(refreshDiag)
+				if not ok then diagLabel.Text = "Error diagnostik: " .. esc(err) end
+			end
+		end
+	end)
+end
+
+-- bagian 2: log konsol (print / warn / error dari game dan script)
+toggle(diagCard, 3, "🧾", "Catat Log Konsol", false, "Pengaturan")
+local logLabel = textPanel(diagCard, 4)
+local LOG_IDLE = 'Belum ada log. Nyalakan "Catat Log Konsol" atau klik "Pindai Remote".'
+local LOG_COLORS = {
+	[Enum.MessageType.MessageError] = "#ff6b6b",
+	[Enum.MessageType.MessageWarning] = "#ffd166",
+	[Enum.MessageType.MessageInfo] = "#6ee7ff",
+}
+logLabel.Text = LOG_IDLE
+
+local logDirty = false
+local function renderLog()
+	logDirty = false
+	if #logLines == 0 then
+		logLabel.Text = LOG_IDLE
+		return
+	end
+	local out = {}
+	for i = math.max(1, #logLines - LOG_SHOW + 1), #logLines do
+		local l = logLines[i]
+		table.insert(out, string.format('<font color="%s">%s</font>', l.color, esc(l.text)))
+	end
+	logLabel.Text = table.concat(out, "\n")
+end
+
+local function addLog(text, mtype)
+	text = tostring(text)
+	local cut = utf8.offset(text, 221)
+	if cut then text = text:sub(1, cut - 1) .. "…" end
+	table.insert(logLines, { text = os.date("%H:%M:%S") .. "  " .. text, color = LOG_COLORS[mtype] or "#cdd9f5" })
+	if #logLines > LOG_MAX then table.remove(logLines, 1) end
+	if not logDirty then
+		logDirty = true
+		task.defer(renderLog)
+	end
+end
+
+Callbacks["Catat Log Konsol"] = function(on)
+	logOn = on
+	if logConn then
+		logConn:Disconnect()
+		logConn = nil
+	end
+	if not on then return end
+	table.clear(logLines)
+	pcall(function()
+		local hist = LogService:GetLogHistory()
+		for i = math.max(1, #hist - 10), #hist do
+			addLog(hist[i].message, hist[i].messageType)
+		end
+	end)
+	logConn = LogService.MessageOut:Connect(addLog)
+	renderLog()
+end
+
+-- bagian 3: tombol utilitas
+local function copyText(txt, okMsg)
+	if pcall(setclipboard, txt) then
+		setStatus(okMsg)
+	else
+		setStatus("Executor tidak mendukung setclipboard - lihat di kotak log")
+		addLog(txt, nil)
+	end
+end
+
+actionRow(diagCard, 5, "📋", "Salin Laporan", "Salin", function()
+	local lines = { "=== Laporan diagnostik Vu Dong Script ===" }
+	for _, r in ipairs(collectDiag()) do
+		table.insert(lines, r[1] .. ": " .. r[2])
+	end
+	if #logLines > 0 then
+		table.insert(lines, "--- Log terbaru ---")
+		for _, l in ipairs(logLines) do table.insert(lines, l.text) end
+	end
+	copyText(table.concat(lines, "\n"), "Laporan diagnostik berhasil disalin")
+end)
+
+actionRow(diagCard, 6, "📍", "Salin Posisi", "Salin", function()
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then
+		setStatus("Belum ada karakter")
+		return
+	end
+	local p = root.Position
+	copyText(string.format("Vector3.new(%.2f, %.2f, %.2f)", p.X, p.Y, p.Z), "Posisi berhasil disalin")
+end)
+
+actionRow(diagCard, 7, "🎯", "Salin Path Objek", "Salin", function()
+	if not (lastTarget and lastTarget.Parent) then
+		setStatus("Klik dulu salah satu objek di dalam game")
+		return
+	end
+	copyText(pathOf(lastTarget), "Path berhasil disalin: " .. lastTarget.Name)
+end)
+
+actionRow(diagCard, 8, "📡", "Pindai Remote", "Pindai", function()
+	local found = {}
+	for _, d in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+		if d:IsA("RemoteEvent") or d:IsA("RemoteFunction") then
+			table.insert(found, d.ClassName .. ": " .. d:GetFullName())
+		end
+	end
+	addLog("Pindai Remote: ditemukan " .. #found .. " remote di ReplicatedStorage", Enum.MessageType.MessageInfo)
+	for i = 1, math.min(#found, 12) do
+		addLog(found[i], nil)
+	end
+	if #found > 12 then
+		addLog("... masih ada " .. (#found - 12) .. " remote lagi (ada di hasil salinan)", nil)
+	end
+	if #found > 0 then
+		copyText(table.concat(found, "\n"), "Berhasil menyalin " .. #found .. " remote")
+	else
+		setStatus("Tidak ada remote di ReplicatedStorage")
+	end
+end)
+
+actionRow(diagCard, 9, "🧹", "Hapus Log", "Hapus", function()
+	table.clear(logLines)
+	renderLog()
+	setStatus("Log dihapus")
+end)
+
+----------------------------------------------------------------
+-- PINDAI MAP (halaman Pengaturan): membaca info + posisi objek di SELURUH map (workspace)
+-- Dipakai agar menulis script lebih mudah: tahu nama objek, jenisnya, lokasinya, path-nya, bisa diklik / diambil atau tidak...
+-- Dibungkus dalam blok do ... end agar tidak memakai variabel local tambahan di tingkat luar (Luau membatasi 200).
+-- Atur SCAN_MAX / SCAN_PAGE / SCAN_CHEST tepat di bawah jika perlu.
+-- CATATAN: jika game mengaktifkan StreamingEnabled, objek yang jauh (belum dimuat) belum bisa dipindai - dekati lalu pindai ulang.
+----------------------------------------------------------------
+do
+	local SCAN_MAX = 30000 -- jumlah objek maksimal yang dicatat tiap pemindaian
+	local SCAN_PAGE = 10 -- jumlah objek yang tampil di kotak tiap halaman
+	local SCAN_COPY_MAX = 3000 -- jumlah baris maksimal saat klik "Salin Hasil" (Simpan File menyimpan semuanya)
+	local SCAN_MARKS = 80 -- jumlah label 3D maksimal (prioritas objek terdekat denganmu)
+	local SCAN_CHEST = { "chest", "peti", "rương", "ruong" } -- huruf kecil; nama yang mengandung kata ini = jenis "Peti"
+	local SCAN_CHEST_IGNORE = { "plate", "armor", "armour" }
+	local CATS = { "Semua", "Model", "Part", "Tool", "Interaktif", "NPC", "Peti", "Spawn/Kursi" }
+	local SCAN_IDLE = 'Belum dipindai. Klik "Pindai Seluruh Map" untuk membaca semua objek di workspace: nama, jenis, path, posisi, ukuran... (Radius 0 = seluruh map).'
+
+	local scanCard = card(setCard.Parent, 3, "🗺️", "Pindai Map", "Baca & pindai posisi objek di seluruh map", Color3.fromRGB(52, 211, 153))
+	metalCard(scanCard)
+
+	local all, view, marks = {}, {}, {} -- all = semua objek yang dipindai, view = objek setelah difilter, marks = label 3D
+	local summaryLines = {}
+	local catFilter, radius, curPage, busy = "Semua", 0, 1, false
+	local scanLabel -- kotak teks hasil (dibuat di bawah)
+
+	local function fmtV(v)
+		return string.format("%.1f, %.1f, %.1f", v.X, v.Y, v.Z)
+	end
+
+	local function getRoot()
+		local ch = player.Character
+		return ch and ch:FindFirstChild("HumanoidRootPart")
+	end
+
+	local function isChest(name)
+		local l = string.lower(name)
+		for _, bad in ipairs(SCAN_CHEST_IGNORE) do
+			if string.find(l, bad, 1, true) then return false end
+		end
+		for _, kw in ipairs(SCAN_CHEST) do
+			if string.find(l, kw, 1, true) then return true end
+		end
+		return false
+	end
+
+	-- klasifikasi satu objek (nil = dilewati)
+	local function classify(inst)
+		if inst:IsA("ProximityPrompt") or inst:IsA("ClickDetector") then return "Interaktif" end
+		if inst:IsA("Tool") then return "Tool" end
+		if inst:IsA("Model") then
+			if inst:FindFirstChildOfClass("Humanoid") then return "NPC" end
+			if isChest(inst.Name) then return "Peti" end
+			return "Model"
+		end
+		if inst:IsA("BasePart") then
+			if inst:IsA("Terrain") then return nil end
+			if inst:IsA("SpawnLocation") or inst:IsA("Seat") or inst:IsA("VehicleSeat") then return "Spawn/Kursi" end
+			if isChest(inst.Name) then return "Peti" end
+			return "Part"
+		end
+		return nil
+	end
+
+	-- posisi objek (Prompt / Click mengikuti objek induk)
+	local function posOf(inst)
+		local ok, p = pcall(function()
+			if inst:IsA("BasePart") then return inst.Position end
+			if inst:IsA("Model") then return inst:GetPivot().Position end
+			if inst:IsA("Tool") then
+				local h = inst:FindFirstChild("Handle")
+				if h and h:IsA("BasePart") then return h.Position end
+			end
+			local par = inst.Parent
+			while par and par ~= workspace do
+				if par:IsA("BasePart") then return par.Position end
+				if par:IsA("Model") then return par:GetPivot().Position end
+				par = par.Parent
+			end
+			return nil
+		end)
+		if ok then return p end
+		return nil
+	end
+
+	-- info tambahan (dihitung saat perlu ditampilkan, tidak saat memindai agar ringan)
+	local function extraOf(inst)
+		local t = {}
+		pcall(function()
+			if inst:IsA("BasePart") then
+				table.insert(t, "Size " .. fmtV(inst.Size))
+				table.insert(t, inst.Anchored and "Anchored" or "Free")
+				table.insert(t, inst.CanCollide and "CanCollide" or "NoCollide")
+				if inst.Transparency >= 1 then table.insert(t, "tak terlihat") end
+			elseif inst:IsA("Model") then
+				local hum = inst:FindFirstChildOfClass("Humanoid")
+				if hum then
+					table.insert(t, string.format("Darah %.0f/%.0f", hum.Health, hum.MaxHealth))
+					if Players:GetPlayerFromCharacter(inst) then table.insert(t, "pemain") end
+				end
+				if inst.PrimaryPart then table.insert(t, "PrimaryPart=" .. inst.PrimaryPart.Name) end
+				table.insert(t, #inst:GetChildren() .. " anak")
+			elseif inst:IsA("ProximityPrompt") then
+				table.insert(t, string.format("ActionText=%q ObjectText=%q Hold=%.1fs Jangkauan=%.0f %s", inst.ActionText, inst.ObjectText,
+					inst.HoldDuration, inst.MaxActivationDistance, inst.Enabled and "Aktif" or "Mati"))
+			elseif inst:IsA("ClickDetector") then
+				table.insert(t, string.format("Jangkauan=%.0f", inst.MaxActivationDistance))
+			elseif inst:IsA("Tool") then
+				table.insert(t, inst:FindFirstChild("Handle") and "ada Handle" or "tanpa Handle")
+			end
+		end)
+		pcall(function()
+			local n = 0
+			for k, v in pairs(inst:GetAttributes()) do
+				n += 1
+				if n > 4 then break end
+				table.insert(t, k .. "=" .. tostring(v))
+			end
+		end)
+		return table.concat(t, " | ")
+	end
+
+	-- satu baris lengkap (untuk salin / simpan file / konsol)
+	local function fullLine(i, e)
+		local parts = {
+			string.format("#%d [%s] %s", i, e.cat, e.cls),
+			pathOf(e.inst),
+			e.pos and string.format("Vector3.new(%.2f, %.2f, %.2f)", e.pos.X, e.pos.Y, e.pos.Z) or "posisi tidak diketahui",
+		}
+		if e.dist then table.insert(parts, string.format("jarak %.1f stud", e.dist)) end
+		local x = extraOf(e.inst)
+		if x ~= "" then table.insert(parts, x) end
+		return table.concat(parts, " | ")
+	end
+
+	local function buildReport(maxLines)
+		local lines = { "=== Vu Dong Script - Pindai Map (PlaceId " .. tostring(game.PlaceId) .. ") ===" }
+		for _, s in ipairs(summaryLines) do table.insert(lines, s) end
+		table.insert(lines, string.format("Filter: %s | Radius: %s | %d hasil", catFilter,
+			radius > 0 and (radius .. " stud") or "seluruh map", #view))
+		table.insert(lines, "--------------------------------------------")
+		for i = 1, math.min(#view, maxLines) do
+			table.insert(lines, fullLine(i, view[i]))
+		end
+		if #view > maxLines then
+			table.insert(lines, "... masih ada " .. (#view - maxLines) .. " baris lagi (pakai tombol Simpan File untuk mengambil semuanya)")
+		end
+		return table.concat(lines, "\n")
+	end
+
+	-- tampilkan hasil di kotak teks
+	local function render()
+		if not scanLabel then return end
+		if #all == 0 then
+			scanLabel.Text = esc(SCAN_IDLE)
+			return
+		end
+		local out = {}
+		for _, s in ipairs(summaryLines) do table.insert(out, esc(s)) end
+		local totalPages = math.max(1, math.ceil(#view / SCAN_PAGE))
+		curPage = math.clamp(curPage, 1, totalPages)
+		table.insert(out, string.format("── Halaman %d/%d · %d hasil · filter: %s · radius: %s ──",
+			curPage, totalPages, #view, esc(catFilter), radius > 0 and (radius .. " stud") or "seluruh map"))
+		for i = (curPage - 1) * SCAN_PAGE + 1, math.min(#view, curPage * SCAN_PAGE) do
+			local e = view[i]
+			local where = e.pos and fmtV(e.pos) or "posisi tidak diketahui"
+			local dist = e.dist and string.format(" · jarak %.0f", e.dist) or ""
+			table.insert(out, string.format("#%d [%s] %s\n      %s%s",
+				i, esc(e.cat), esc(e.name), esc(where), dist))
+		end
+		if #view == 0 then table.insert(out, "(tidak ada objek yang cocok dengan filter)") end
+		scanLabel.Text = table.concat(out, "\n")
+	end
+
+	-- filter berdasarkan jenis + radius, urutkan dari dekat ke jauh
+	local function applyFilter()
+		table.clear(view)
+		local root = getRoot()
+		local rp = root and root.Position
+		for _, e in ipairs(all) do
+			if catFilter == "Semua" or e.cat == catFilter then
+				local d = (rp and e.pos) and (e.pos - rp).Magnitude or nil
+				if radius <= 0 or (d and d <= radius) then
+					e.dist = d
+					table.insert(view, e)
+				end
+			end
+		end
+		table.sort(view, function(a, b)
+			local da, db = a.dist or math.huge, b.dist or math.huge
+			if da ~= db then return da < db end
+			return a.name < b.name
+		end)
+	end
+
+	-- label 3D di dalam game: tampilkan nama + koordinat pada objek terdekat denganmu (menembus dinding)
+	local function clearMarks()
+		for _, g in ipairs(marks) do g:Destroy() end
+		table.clear(marks)
+	end
+
+	local function adorneeOf(inst)
+		if inst:IsA("BasePart") then return inst end
+		if inst:IsA("Model") then return inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true) end
+		if inst:IsA("Tool") then
+			local h = inst:FindFirstChild("Handle")
+			if h and h:IsA("BasePart") then return h end
+		end
+		local par = inst.Parent
+		while par and par ~= workspace do
+			if par:IsA("BasePart") then return par end
+			if par:IsA("Model") then return par.PrimaryPart or par:FindFirstChildWhichIsA("BasePart", true) end
+			par = par.Parent
+		end
+		return nil
+	end
+
+	local function drawMarks()
+		clearMarks()
+		if not State["Tampilkan Label Posisi"] then return end
+		local gui = player:FindFirstChildOfClass("PlayerGui")
+		if not gui then return end
+		for i = 1, math.min(#view, SCAN_MARKS) do
+			local e = view[i]
+			local ok, part = pcall(adorneeOf, e.inst)
+			if ok and part and part.Parent then
+				local bb = Instance.new("BillboardGui")
+				bb.Name = "VuDongMapMark"
+				bb.Adornee = part
+				bb.AlwaysOnTop = true
+				bb.ResetOnSpawn = false
+				bb.Size = UDim2.fromOffset(220, 46)
+				bb.StudsOffset = Vector3.new(0, 2, 0)
+				bb.MaxDistance = 2000
+				local t = Instance.new("TextLabel")
+				t.BackgroundTransparency = 1
+				t.Size = UDim2.fromScale(1, 1)
+				t.Font = Enum.Font.SourceSansBold
+				t.TextSize = 14
+				t.TextWrapped = true
+				t.TextColor3 = Color3.fromRGB(110, 231, 183)
+				t.TextStrokeTransparency = 0
+				t.Text = string.format("#%d %s\n%s", i, e.name, e.pos and fmtV(e.pos) or "")
+				t.Parent = bb
+				bb.Parent = gui
+				table.insert(marks, bb)
+			end
+		end
+	end
+
+	-- ubah filter / radius: dikumpulkan, tunggu 0.25 detik baru dihitung (geser slider tidak lag)
+	local refreshToken = 0
+	local function refreshSoon()
+		refreshToken += 1
+		local my = refreshToken
+		task.delay(0.25, function()
+			if my == refreshToken and #all > 0 then
+				applyFilter()
+				render()
+				drawMarks()
+			end
+		end)
+	end
+
+	-- PINDAI SELURUH MAP
+	local function runScan()
+		if busy then
+			setStatus("Sedang memindai, tunggu sebentar...")
+			return
+		end
+		busy = true
+		setStatus("Sedang memindai map...")
+		local t0 = os.clock()
+		table.clear(all)
+
+		-- lewati bagian tubuh di dalam karakter pemain (agar tidak berantakan), karakternya sendiri tetap dicatat
+		local skip = {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			local ch = p.Character
+			if ch then
+				for _, d in ipairs(ch:GetDescendants()) do skip[d] = true end
+			end
+		end
+
+		local counts, capped = {}, false
+		local minP, maxP, sumP, nPos = nil, nil, Vector3.zero, 0
+		local ok, err = pcall(function()
+			local n = 0
+			for _, inst in ipairs(workspace:GetDescendants()) do
+				n += 1
+				if n % 1500 == 0 then task.wait() end -- beri jeda frame agar game tidak freeze
+				if not skip[inst] then
+					local cat = classify(inst)
+					if cat then
+						local pos = posOf(inst)
+						table.insert(all, { inst = inst, name = inst.Name, cls = inst.ClassName, cat = cat, pos = pos })
+						counts[cat] = (counts[cat] or 0) + 1
+						if pos then
+							nPos += 1
+							sumP += pos
+							minP = minP and Vector3.new(math.min(minP.X, pos.X), math.min(minP.Y, pos.Y), math.min(minP.Z, pos.Z)) or pos
+							maxP = maxP and Vector3.new(math.max(maxP.X, pos.X), math.max(maxP.Y, pos.Y), math.max(maxP.Z, pos.Z)) or pos
+						end
+						if #all >= SCAN_MAX then
+							capped = true
+							break
+						end
+					end
+				end
+			end
+		end)
+		busy = false
+		if not ok then
+			setStatus("Error pindai map: " .. tostring(err))
+			addLog("Error pindai map: " .. tostring(err), Enum.MessageType.MessageError)
+			return
+		end
+
+		table.clear(summaryLines)
+		table.insert(summaryLines, string.format("Berhasil memindai %d objek di workspace (%.1f detik)", #all, os.clock() - t0))
+		local cs = {}
+		for _, name in ipairs(CATS) do
+			if counts[name] then table.insert(cs, name .. " " .. counts[name]) end
+		end
+		table.insert(summaryLines, #cs > 0 and table.concat(cs, " · ") or "(tidak ada objek terlihat)")
+		if minP and maxP then
+			table.insert(summaryLines, string.format("Rentang map: X %.0f→%.0f | Y %.0f→%.0f | Z %.0f→%.0f",
+				minP.X, maxP.X, minP.Y, maxP.Y, minP.Z, maxP.Z))
+			local c = sumP / nPos
+			table.insert(summaryLines, string.format("Titik pusat rata-rata: %s", fmtV(c)))
+		end
+		local root = getRoot()
+		if root then table.insert(summaryLines, "Posisimu saat memindai: " .. fmtV(root.Position)) end
+		if workspace.StreamingEnabled then
+			table.insert(summaryLines, "⚠ Game mengaktifkan StreamingEnabled: objek jauh yang belum dimuat belum bisa dipindai")
+		end
+		if capped then
+			table.insert(summaryLines, "⚠ Mencapai batas " .. SCAN_MAX .. " objek - naikkan SCAN_MAX jika perlu memindai semuanya")
+		end
+
+		curPage = 1
+		applyFilter()
+		render()
+		drawMarks()
+		addLog(summaryLines[1], Enum.MessageType.MessageInfo)
+		setStatus("Pemindaian selesai: " .. #all .. " objek")
+	end
+
+	-- antarmuka: satu fitur tiap baris
+	actionRow(scanCard, 1, "🗺️", "Pindai Seluruh Map", "Pindai", runScan)
+
+	dropdown(scanCard, 2, "🔎", "Filter Jenis Objek", CATS, "Semua", function(name)
+		catFilter = name
+		curPage = 1
+		refreshSoon()
+		setStatus("Filter: " .. name)
+	end)
+
+	slider(scanCard, 3, "📏", "Radius", 0, 2000, 0, function(v)
+		radius = v
+		curPage = 1
+		refreshSoon()
+	end)
+
+	scanLabel = textPanel(scanCard, 4)
+	scanLabel.Text = esc(SCAN_IDLE)
+
+	actionRow(scanCard, 5, "◀️", "Halaman Sebelumnya", "◀", function()
+		local totalPages = math.max(1, math.ceil(#view / SCAN_PAGE))
+		curPage = curPage - 1
+		if curPage < 1 then curPage = totalPages end
+		render()
+	end)
+
+	actionRow(scanCard, 6, "▶️", "Halaman Berikutnya", "▶", function()
+		local totalPages = math.max(1, math.ceil(#view / SCAN_PAGE))
+		curPage = curPage + 1
+		if curPage > totalPages then curPage = 1 end
+		render()
+	end)
+
+	toggle(scanCard, 7, "🏷️", "Tampilkan Label Posisi", false, "Pengaturan")
+	Callbacks["Tampilkan Label Posisi"] = function(on)
+		if on then drawMarks() else clearMarks() end
+	end
+
+	actionRow(scanCard, 8, "📋", "Salin Hasil", "Salin", function()
+		if #all == 0 then
+			setStatus("Pindai map dulu")
+			return
+		end
+		copyText(buildReport(SCAN_COPY_MAX), "Berhasil menyalin " .. math.min(#view, SCAN_COPY_MAX) .. " baris hasil pindai")
+	end)
+
+	actionRow(scanCard, 9, "💾", "Simpan File .txt", "Simpan", function()
+		if #all == 0 then
+			setStatus("Pindai map dulu")
+			return
+		end
+		local fname = "VuDong_MapScan_" .. tostring(game.PlaceId) .. ".txt"
+		if pcall(writefile, fname, buildReport(math.huge)) then
+			setStatus("Berhasil menyimpan " .. #view .. " baris ke file " .. fname)
+			addLog("Hasil pindai disimpan: " .. fname, Enum.MessageType.MessageInfo)
+		else
+			setStatus("Executor tidak mendukung writefile - pakai tombol Salin")
+		end
+	end)
+
+	actionRow(scanCard, 10, "🎯", "Salin Objek Terdekat", "Salin", function()
+		local e = view[1]
+		if not e then
+			setStatus("Belum ada hasil - pindai map dulu")
+			return
+		end
+		copyText(fullLine(1, e), "Objek terdekat berhasil disalin: " .. e.name)
+	end)
+
+	actionRow(scanCard, 11, "🖨️", "Cetak ke Konsol", "Cetak", function()
+		if #view == 0 then
+			setStatus("Belum ada hasil - pindai map dulu")
+			return
+		end
+		local n = math.min(#view, 300)
+		print("=== Vu Dong Script - Pindai Map: " .. #view .. " hasil (mencetak " .. n .. " baris pertama) ===")
+		for i = 1, n do print(fullLine(i, view[i])) end
+		setStatus("Berhasil mencetak " .. n .. " baris ke konsol")
+	end)
+
+	actionRow(scanCard, 12, "🧹", "Hapus Hasil Pindai", "Hapus", function()
+		table.clear(all)
+		table.clear(view)
+		table.clear(summaryLines)
+		clearMarks()
+		curPage = 1
+		render()
+		setStatus("Hasil pindai dihapus")
+	end)
+end -- akhir blok Pindai Map
+
+-- Tab: Informasi
+local homePage = newPage("Informasi")
+
+local function rightLabel(r, text)
+	local l = label(r, {
+		Text = text or "", TextSize = 27, Font = F_BOLD, TextXAlignment = Enum.TextXAlignment.Right,
+		AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -32, 0.5, 0), Size = UDim2.fromOffset(340, ROW_H),
+	})
+	themed(function() l.TextColor3 = theme.accent2 end)
+	return l
+end
+
+-- Kartu Informasi (halaman Informasi)
+local infoCard = card(homePage, 1, "ℹ️", "Informasi", "Script dikembangkan oleh Vu Dong", Color3.fromRGB(59, 155, 255))
+-- Daftar elemen dengan animasi warna lembut (dijalankan di akhir bagian Informasi)
+local blinkTargets = {}
+local function blink(inst, prop)
+	if prop == "TextColor3" then return end -- teks sudah ditangani blok "TEKS SELURUH MENU" di akhir file
+	table.insert(blinkTargets, { inst, prop })
+end
+do
+	local cardStroke = infoCard:FindFirstChildOfClass("UIStroke")
+	if cardStroke then blink(cardStroke, "Color") end
+	for _, d in ipairs(infoCard:GetDescendants()) do
+		if d:IsA("TextLabel") and d.Text == "Informasi" then blink(d, "TextColor3") end
+	end
+end
+local box = new("Frame", {
+	BackgroundColor3 = Color3.fromRGB(24, 25, 29), LayoutOrder = 1,
+	Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+}, infoCard)
+corner(box, 26)
+local boxStroke = stroke(box, theme.accent, 3, 0.2)
+themed(function() boxStroke.Color = theme.accent end)
+blink(boxStroke, "Color")
+pad(box, 28, 28, 28, 28)
+list(box, 12)
+blink(label(box, { Text = "👑  Vu Dong Script", TextSize = 30, Font = F_BOLD, LayoutOrder = 0, Size = UDim2.new(1, 0, 0, 108) }), "TextColor3")
+for i, t in ipairs({ "Sepenuhnya gratis", "Tanpa Key", "Aman - Stabil", "Diperbarui secara berkala" }) do
+	blink(label(box, { Text = "✅  " .. t, TextSize = 25, TextColor3 = Color3.fromRGB(206, 210, 218), LayoutOrder = i, Size = UDim2.new(1, 0, 0, 90) }), "TextColor3")
+end
+-- buka kanal Telegram: coba buka browser + salin link (tergantung lingkungan eksekusi),
+-- kalau tidak bisa, link tetap ditampilkan di bilah status agar pemain bisa membukanya sendiri
+local function openChannel()
+	local copied = pcall(setclipboard, TELEGRAM_URL)
+	pcall(function() GuiService:OpenBrowserWindow(TELEGRAM_URL) end)
+	if copied then
+		setStatus("Link kanal berhasil disalin: " .. TELEGRAM_SHORT)
+	else
+		setStatus("Kanal Telegram: " .. TELEGRAM_SHORT)
+	end
+end
+
+local tgRow = row(box, 5, "✈", "Telegram: " .. TELEGRAM_SHORT, 220)
+blink(rightLabel(tgRow, "Buka  ›"), "TextColor3")
+new("TextButton", { Text = "", BackgroundTransparency = 1, ZIndex = 5, Size = UDim2.fromScale(1, 1) }, tgRow)
+	.Activated:Connect(openChannel)
+
+-- TikTok
+local function openTikTok()
+	local copied = pcall(setclipboard, TIKTOK_URL)
+	pcall(function() GuiService:OpenBrowserWindow(TIKTOK_URL) end)
+	if copied then
+		setStatus("Link TikTok berhasil disalin: " .. TIKTOK_SHORT)
+	else
+		setStatus("TikTok: " .. TIKTOK_SHORT)
+	end
+end
+
+local ttRow = row(box, 6, "🎵", TIKTOK_SHORT, 220)
+blink(rightLabel(ttRow, "Buka  ›"), "TextColor3")
+new("TextButton", { Text = "", BackgroundTransparency = 1, ZIndex = 5, Size = UDim2.fromScale(1, 1) }, ttRow)
+	.Activated:Connect(openTikTok)
+
+-- Dukungan: klik untuk menyalin nomor rekening
+blink(label(box, { Text = "💖  Dukung aku ya!", TextSize = 25, Font = F_BOLD, TextColor3 = Color3.fromRGB(206, 210, 218), LayoutOrder = 7, Size = UDim2.new(1, 0, 0, 90) }), "TextColor3")
+
+local bankRow = row(box, 8, "🏦", BANK_NAME .. " " .. BANK_NUMBER, 220)
+blink(rightLabel(bankRow, "Salin  ›"), "TextColor3")
+new("TextButton", { Text = "", BackgroundTransparency = 1, ZIndex = 5, Size = UDim2.fromScale(1, 1) }, bankRow)
+	.Activated:Connect(function()
+		local copied = pcall(setclipboard, BANK_NUMBER)
+		if copied then
+			setStatus("Nomor rekening berhasil disalin " .. BANK_NAME .. ": " .. BANK_NUMBER)
+		else
+			setStatus("No. Rek " .. BANK_NAME .. ": " .. BANK_NUMBER)
+		end
+	end)
+
+local cta = new("TextButton", {
+	Text = "✈  Dukung kanal agar ada lebih banyak script keren ya!", TextSize = ts(23), Font = F_BOLD, TextColor3 = Color3.new(1, 1, 1),
+	TextWrapped = true, LayoutOrder = 9, Size = UDim2.new(1, 0, 0, 150),
+}, box)
+corner(cta, 75)
+themed(function() cta.BackgroundColor3 = theme.accent end) -- warna awal, lalu animasi menimpanya
+cta.TextStrokeTransparency = 0.35 -- garis tepi teks hitam agar mudah dibaca di semua warna
+blink(cta, "BackgroundColor3")
+cta.Activated:Connect(function()
+	openChannel()
+	local cb = Callbacks["Support"]
+	if cb then task.spawn(cb) end
+end)
+
+-- Palet abu-abu lembut untuk animasi di halaman Informasi (dari gelap ke terang).
+-- Tiap elemen bergeser 1 warna sehingga terbentuk kilau yang bergerak pelan. Hanya berjalan saat halaman ini dilihat.
+local BLINK_COLORS = {
+	Color3.fromRGB(88, 93, 104),
+	Color3.fromRGB(100, 105, 117),
+	Color3.fromRGB(112, 117, 130),
+	Color3.fromRGB(124, 129, 142),
+	Color3.fromRGB(112, 117, 130),
+	Color3.fromRGB(100, 105, 117),
+	Color3.fromRGB(88, 93, 104),
+}
+local BLINK_STEP = 1.2 -- detik antar pergantian warna (lebih kecil = lebih cepat)
+task.spawn(function()
+	local step = 0
+	while infoCard.Parent do
+		if main.Visible and homePage.Visible then
+			step += 1
+			for i, t in ipairs(blinkTargets) do
+				local inst, prop = t[1], t[2]
+				if inst.Parent then
+					TweenService:Create(inst, TweenInfo.new(BLINK_STEP * 0.6), { [prop] = BLINK_COLORS[(step + i) % #BLINK_COLORS + 1] }):Play()
+				end
+			end
+		end
+		task.wait(BLINK_STEP)
+	end
+end)
+
+----------------------------------------------------------------
+-- Bilah samping (navigasi): klik tab mana pun untuk menampilkan halamannya
+----------------------------------------------------------------
+local side = new("Frame", {
+	BackgroundColor3 = Color3.fromRGB(26, 27, 31), BackgroundTransparency = 0.3,
+	Position = UDim2.fromOffset(MARG, BODY_TOP), Size = UDim2.new(0, SIDE_W, 1, -(BODY_TOP + BOT)),
+}, main)
+corner(side, 30)
+metalStroke(side, 3)
+
+local navList = new("Frame", { BackgroundTransparency = 1, Position = UDim2.fromOffset(14, 14), Size = UDim2.new(1, -28, 0, 0), AutomaticSize = Enum.AutomaticSize.Y }, side)
+list(navList, 12)
+
+for i, t in ipairs(TABS) do
+	local b = new("TextButton", {
+		Text = t[1] .. "   " .. t[2], TextSize = ts(29), Font = F_MED, TextColor3 = TEXT, AutoButtonColor = false,
+		TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = i, Size = UDim2.new(1, 0, 0, 112),
+		BackgroundColor3 = theme.accent, BackgroundTransparency = 1,
+	}, navList)
+	corner(b, 26)
+	pad(b, 0, 0, 0, 36)
+	navByName[t[2]] = b
+	b.Activated:Connect(function() showTab(t[2]) end)
+end
+themed(function()
+	for _, b in pairs(navByName) do b.BackgroundColor3 = theme.accent end
+end)
+
+showTab("Informasi")
+setOpen(true)
+
+----------------------------------------------------------------
+-- NOTIFIKASI SELAMAT DATANG saat masuk Menu
+-- Ditaruh di fungsi tersendiri agar TIDAK menambah variabel local di tingkat paling luar
+-- (Luau membatasi 200 variabel local per fungsi, file ini sudah hampir mencapai batas itu).
+-- Notifikasi meluncur turun dari atas layar, menutup sendiri setelah beberapa detik,
+-- disentuh langsung menutup. Mengikuti sakelar Pengaturan → "Tampilkan Notifikasi".
+----------------------------------------------------------------
+task.spawn(function()
+	local WELCOME_TITLE = "Selamat datang, %s!" -- %s = nama tampilan pemain
+	local WELCOME_TEXT = "Vu Dong Script sudah siap. Selamat bermain!"
+	local WELCOME_TIME = 4 -- lama notifikasi tampil (detik)
+	local WELCOME_EVERY_OPEN = false -- true = tampil lagi tiap membuka menu (false = hanya sekali saat masuk)
+
+	local TOAST_W, TOAST_H = 420, 104
+	local toast = nil -- notifikasi yang sedang tampil
+
+	-- nama pemain bisa mengandung karakter < > & sehingga harus di-escape sebelum dipakai di RichText
+	local function escape(s)
+		return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+	end
+
+	local function dismiss(t)
+		if toast ~= t or not t.Parent then return end
+		toast = nil
+		local tw = TweenService:Create(t, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+			Position = UDim2.new(0.5, 0, 0, -(TOAST_H + 30)),
+		})
+		tw.Completed:Connect(function() t:Destroy() end)
+		tw:Play()
+	end
+
+	local function notify(title, text, seconds)
+		if State["Tampilkan Notifikasi"] == false then return end
+		seconds = seconds or 4
+		if toast then toast:Destroy() toast = nil end -- notifikasi baru menggantikan yang lama
+
+		local t = new("Frame", {
+			Name = "VuDongToast", AnchorPoint = Vector2.new(0.5, 0), ZIndex = 100,
+			Position = UDim2.new(0.5, 0, 0, -(TOAST_H + 30)),
+			Size = UDim2.fromOffset(TOAST_W, TOAST_H),
+			BackgroundColor3 = Color3.fromRGB(30, 31, 35),
+		}, gui)
+		toast = t
+		corner(t, 22)
+		metalStroke(t, 3)
+		-- layar sempit (HP posisi tegak) dikecilkan agar pas
+		new("UIScale", { Scale = math.clamp((gui.AbsoluteSize.X - 24) / TOAST_W, 0.5, 1) }, t)
+
+		label(t, { Text = "👑", TextSize = 38, Font = F_BOLD, TextXAlignment = Enum.TextXAlignment.Center,
+			Position = UDim2.fromOffset(10, 0), Size = UDim2.fromOffset(70, TOAST_H - 8) }, true)
+		label(t, { RichText = true, TextSize = 23, Font = F_BOLD, TextTruncate = Enum.TextTruncate.AtEnd,
+			Text = escape(title),
+			Position = UDim2.fromOffset(84, 12), Size = UDim2.new(1, -98, 0, 30) }, true)
+		label(t, { Text = text, TextSize = 17, TextColor3 = MUTED, TextWrapped = true,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			Position = UDim2.fromOffset(84, 44), Size = UDim2.new(1, -98, 0, 46) }, true)
+
+		-- bar waktu yang makin memendek di bagian bawah
+		local bar = new("Frame", {
+			BackgroundColor3 = theme.accent, BorderSizePixel = 0, AnchorPoint = Vector2.new(0, 1),
+			Position = UDim2.new(0, 16, 1, -8), Size = UDim2.new(1, -32, 0, 4),
+		}, t)
+		corner(bar, 2)
+
+		-- sentuh notifikasi untuk menutup langsung
+		new("TextButton", { Text = "", BackgroundTransparency = 1, ZIndex = 101, Size = UDim2.fromScale(1, 1) }, t)
+			.Activated:Connect(function() dismiss(t) end)
+
+		TweenService:Create(t, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+			Position = UDim2.new(0.5, 0, 0, 20),
+		}):Play()
+		TweenService:Create(bar, TweenInfo.new(seconds, Enum.EasingStyle.Linear), {
+			Size = UDim2.new(0, 0, 0, 4),
+		}):Play()
+		task.delay(seconds, function() dismiss(t) end)
+	end
+
+	local function welcome()
+		notify(WELCOME_TITLE:format(player.DisplayName), WELCOME_TEXT, WELCOME_TIME)
+	end
+
+	if WELCOME_EVERY_OPEN then
+		main:GetPropertyChangedSignal("Visible"):Connect(function()
+			if main.Visible then welcome() end
+		end)
+	end
+
+	task.wait(0.4) -- tunggu menu tampil dulu baru notifikasi meluncur turun
+	welcome()
+end)
+
+----------------------------------------------------------------
+-- TEKS SELURUH MENU: animasi warna (DEFAULT MATI agar nyaman di mata)
+-- - Berlaku untuk SEMUA TextLabel / TextButton / TextBox di menu, termasuk teks yang dibuat belakangan
+--   (notifikasi, daftar pindai map...). Memakai palet BLINK_COLORS dan ritme BLINK_STEP yang sama.
+-- - Hanya SATU loop untuk semua teks (tanpa Tween terpisah per teks) dan teks tersembunyi dilewati sehingga ringan.
+-- - Tiap teks bergeser 1 warna sehingga terbentuk efek warna bergerak.
+-- - Tidak diubah: teks di log Diagnostik (warna tetap menurut level error / peringatan) dan label 3D ESP / Pindai Map di dunia game.
+-- - Ditaruh di fungsi tersendiri (task.spawn) agar TIDAK menambah variabel local di tingkat paling luar (batas 200 variabel).
+----------------------------------------------------------------
+task.spawn(function()
+	local TEXT_ANIMATE = false -- true = teks berganti-ganti warna (BLINK_COLORS); false = teks diam & nyaman di mata
+	local TEXT_FADE = 0.6    -- bagian tiap ritme yang dipakai untuk beralih ke warna berikut (0 = ganti warna instan)
+	local TEXT_OUTLINE = 0.7 -- transparansi garis tepi teks hitam tipis agar mudah dibaca (1 = tanpa garis tepi)
+	local TEXT_FPS = 20      -- jumlah pembaruan warna per detik
+
+	local n = #BLINK_COLORS
+	local tracked = setmetatable({}, { __mode = "k" }) -- [teks] = { fase warna, warna terakhir yang diset }
+	local count = 0
+
+	local function track(d)
+		if tracked[d] then return end
+		if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+			count += 1
+			tracked[d] = { count % n, nil }
+			if TEXT_OUTLINE < 1 and d.TextStrokeTransparency >= 1 then
+				d.TextStrokeColor3 = Color3.new(0, 0, 0)
+				d.TextStrokeTransparency = TEXT_OUTLINE
+			end
+		end
+	end
+	for _, d in ipairs(gui:GetDescendants()) do track(d) end
+	gui.DescendantAdded:Connect(track)
+
+	-- true = tampil, false = tersembunyi (dirinya atau bingkai induk), nil = sudah dihapus dari menu
+	local function shown(p, memo)
+		if p == gui then return true end
+		if p == nil then return nil end
+		local m = memo[p]
+		if m ~= nil then return m end
+		local r
+		if p:IsA("GuiObject") and not p.Visible then
+			r = false
+		else
+			r = shown(p.Parent, memo)
+		end
+		memo[p] = r
+		return r
+	end
+
+	-- warna fase `phase` pada waktu t: bertahan di satu warna lalu beralih halus ke warna berikut
+	local function colorAt(t, phase)
+		local pos = t / BLINK_STEP + phase
+		local i = math.floor(pos)
+		local a = BLINK_COLORS[i % n + 1]
+		if TEXT_FADE <= 0 then return a end
+		local k = math.clamp((pos - i) / TEXT_FADE, 0, 1)
+		k = k * k * (3 - 2 * k)
+		return a:Lerp(BLINK_COLORS[(i + 1) % n + 1], k)
+	end
+
+	local cols, memo = {}, {}
+	local acc, t0, conn = 0, os.clock(), nil
+	conn = RunService.Heartbeat:Connect(function(dt)
+		acc += dt
+		if acc < 1 / TEXT_FPS then return end
+		acc = 0
+		if not gui.Parent then conn:Disconnect() return end
+		if not TEXT_ANIMATE then return end
+		local t = os.clock() - t0
+		for phase = 0, n - 1 do cols[phase] = colorAt(t, phase) end
+		table.clear(memo)
+		for d, rec in pairs(tracked) do
+			local s = shown(d, memo)
+			if s == nil then
+				tracked[d] = nil
+			elseif s then
+				local c = cols[rec[1]]
+				if rec[2] ~= c then
+					rec[2] = c
+					d.TextColor3 = c
+				end
+			end
+		end
+	end)
+end)
